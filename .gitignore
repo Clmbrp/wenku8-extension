@@ -16,3 +16,5 @@ generated-src/
 
 # local debugging artifacts (captures, tokens)
 .tmp*/
+
+assets/

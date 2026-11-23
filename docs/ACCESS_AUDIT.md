@@ -77,7 +77,14 @@
 - **[已实现／单元测试] 封面解析。** 详情页按响应 URL 和 HTML `base` 语义解析 `img[src]`。仅采纳默认端口、无用户信息、且图片路径与当前书籍 ID 一致的 `img.wenku8.com` 封面，使用已验证的 HTTPS 地址。榜单及缺图的详情以该 CDN 的已知规则填充 URL。维持宿主默认请求头与 TLS 校验。Debug 版按已知封面路径记录响应状态、媒体类型是否为图片和最终目标是否仍为已知 CDN 路径；连接失败记录 `NETWORK`，日志不包含 URL 查询参数、Cookie、认证头或响应体。
 - **[已实现／单元测试] 详情和目录。** 详情从 `#content` 提取标题、作者、简介、分类、状态及封面；缺少可选字段时可用同书目录或封面识别详情结构。按详情页给出的同书目录链接请求 `table.css`，从 `td.vcss` 获取卷名，从 `td.ccss > a[href]` 获取章名与链接。目录保留站点卷章顺序和插图条目，按同书规范路径去重，传给 Mihon 时转为新章在前的来源顺序。LightNovelReader 的选择器支持这一结构，LiteTale 的目录解析使用相同的卷章单元格，但取带 `aid`/`cid` 的另一种链接。 [LightNovelReader 选择器](https://github.com/Xempastissimo/LightNovelReader/blob/16ebd0dd2ee82c7cc159595f9e26e8cab1dfda50/app/src/main/java/com/xempastissimo/lightnovelreader/data/source/wenku8/Wenku8Selectors.kt) · [LiteTale 目录解析](https://github.com/metaMMY07/LiteTale/blob/ab4129b56e8825d375979d8f8dff77dfd44a1266/rust/src/wenku8/client.rs)
 - **[本地样本回放]** 1.6.6 从已保存的书籍详情和目录提取出标题、作者、简介、封面和分属三个卷组的 21 个目录条目，包含「上卷 插图」`/novel/0/6/13917.htm`。回放使用原始样本的本地保存内容，没有向站点发起请求。
-- **[待 Android 验证]** 1.6.6 在同一会话中能否加载热门封面、书籍详情和多卷目录，仍需在设备上确认。若封面仍失败，用 `adb logcat -d -s Wenku8Access:D` 筛选 `cover` 行，区分无实际请求、连接失败、HTTP 错误和图片响应；缓存命中可跳过网络，因此没有日志不能单独证明请求配置有误。正文阅读和章节插图渲染留在后续阶段。
+- **[Android 真机，用户报告]** 1.6.6 已显示真实热门书目、封面、书籍详情和带卷名的章节目录，多卷排序初步正确。正文阅读和章节插图渲染留在后续阶段。
+
+## 阶段 3 第二批：热门、最新和搜索
+
+- **[样本与用户报告]** 已保存的 `assets/search.html` 导航把「热门轻小说」指向 `/modules/article/toplist.php?sort=allvisit`，把「今日更新」和「最近更新」指向 `sort=lastupdate`。用户确认网页排行榜有分页。LightNovelReader 和 LiteTale 的榜单请求均使用该路径及 `page` 参数，按 `table.grid` 解析书籍卡片。单独的热度汇总页 `/top.php` 继续作为可选的 WebView 人工验证入口。匿名检查未取得榜单内容，登录后热门与最新的页面结构和翻页仍待 Android 实测。 [LightNovelReader 地址定义](https://github.com/Xempastissimo/LightNovelReader/blob/16ebd0dd2ee82c7cc159595f9e26e8cab1dfda50/app/src/main/java/com/xempastissimo/lightnovelreader/data/source/wenku8/Wenku8Urls.kt) · [LiteTale 客户端](https://github.com/metaMMY07/LiteTale/blob/ab4129b56e8825d375979d8f8dff77dfd44a1266/rust/src/wenku8/client.rs)
+- **[浏览器实测与样本]** 中文完整书名的已确认请求链为 `POST /so.php` → 302 → `GET /modules/article/search.php?…` → 302 → `GET /book/6.htm`。搜「化」的保存样本中，`#content table.grid` 包含多个结果，`#pagelink` 内 `#pagestats` 为 `1/2`，`a.next` 指向 `/modules/article/search.php?searchtype=articlename&searchkey=%BB%AF&page=2`。插件首屏提交 GBK 网页表单，后续用相同词的 GBK URL 直接请求对应页码。无结果页候选只在有明确提示或空的搜索结果表时返回空，具体站点空结果文案仍待实测。
+- **[已实现]** 两类榜单及搜索结果保留页面顺序，优先使用完整提示标题，合并同一书籍的多个链接并继续使用经确认的 HTTPS 封面。分页比对当前页标记和指向同一列表的下一页链接，拒绝错页或无法识别的页面。Mihon v0.21.3 在分页会话内按书籍 URL 过滤跨页重复，插件无需在多个搜索或标签之间共享翻页状态。 [Mihon 分页源码](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/data/src/main/java/tachiyomi/data/source/SourcePagingSource.kt)
+- **[本地样本回放]** 将保存的「化」搜索结果作为模拟 GBK 响应回放，成功提取 20 本不同书籍和 HTTPS 封面，并识别第 2 页链接。未向站点发送搜索请求。
 
 ## 开源项目证据与界限
 

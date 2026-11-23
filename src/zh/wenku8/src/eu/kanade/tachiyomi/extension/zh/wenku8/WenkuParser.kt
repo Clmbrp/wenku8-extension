@@ -5,10 +5,11 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-internal data class WenkuBook(val title: String, val path: String) {
-    val coverUrl: String?
-        get() = WenkuCover.forBook(path.substringAfterLast('/').substringBefore('.'))
-}
+internal data class WenkuBook(
+    val title: String,
+    val path: String,
+    val coverUrl: String? = WenkuCover.forBook(path.substringAfterLast('/').substringBefore('.')),
+)
 
 internal object WenkuCover {
     private const val HOST = "img.wenku8.com"
@@ -45,27 +46,8 @@ internal data class WenkuDetails(
 internal data class WenkuChapter(val title: String, val volume: String?, val path: String)
 
 internal object WenkuParser {
-    /** The known total ranking, not every category on the overview page. */
-    fun totalRanking(document: Document, host: String): List<WenkuBook> {
-        val group = document.select("div.blocktop").firstOrNull {
-            it.selectFirst(".blockcaption")?.text()?.trim() == "总热度榜"
-        } ?: throw WenkuAccessException(AccessFailure.STRUCTURE, "未找到总热度榜，网站结构可能已变化")
-        val anchors = group.select(".blockcontent > ul.ultop > li > a[href]")
-        if (anchors.isEmpty()) throw WenkuAccessException(AccessFailure.STRUCTURE, "榜单没有可识别的书籍，网站结构可能已变化")
-        return anchors.map { link ->
-            val url = link.absUrl("href").toHttpUrlOrNull()
-                ?: throw WenkuAccessException(AccessFailure.STRUCTURE, "榜单书籍地址无效")
-            if (url.scheme != "https" || url.host != host || url.port != 443 || !BOOK_PATH.matches(url.encodedPath)) {
-                throw WenkuAccessException(AccessFailure.STRUCTURE, "榜单书籍地址不符合预期")
-            }
-            val title = link.attr("tiptitle").trim().ifBlank { link.attr("title").trim() }.ifBlank { link.text().trim() }
-            if (title.isBlank()) throw WenkuAccessException(AccessFailure.STRUCTURE, "榜单书籍缺少标题")
-            WenkuBook(title, url.encodedPath)
-        }.distinctBy { it.path }
-    }
-
     fun details(document: Document, origin: HttpUrl): WenkuDetails {
-        val page = document.location().toHttpUrlOrNull()?.takeIf { it.hasOrigin(origin) }
+        val page = document.location().toHttpUrlOrNull()?.takeIf { it.hasWenkuOrigin(origin) }
             ?: structure("书籍详情地址不符合预期")
         val id = BOOK_PATH.matchEntire(page.encodedPath)?.groupValues?.get(1)
             ?: structure("书籍详情地址不符合预期")
@@ -73,7 +55,7 @@ internal object WenkuParser {
         val catalogPath = content.select("a[href]").firstNotNullOfOrNull { link ->
             val url = link.absUrl("href").toHttpUrlOrNull() ?: return@firstNotNullOfOrNull null
             val match = CATALOG_PATH.matchEntire(url.encodedPath)
-            url.encodedPath.takeIf { url.hasOrigin(origin) && match?.groupValues?.get(2) == id }
+            url.encodedPath.takeIf { url.hasWenkuOrigin(origin) && match?.groupValues?.get(2) == id }
         }
         val cover = content.select("img[src]").firstNotNullOfOrNull { WenkuCover.fromPage(it, id) }
         val tables = content.select("table")
@@ -119,7 +101,7 @@ internal object WenkuParser {
             }
             for (link in cell.select("> a[href]")) {
                 val url = link.absUrl("href").toHttpUrlOrNull()
-                if (url == null || !url.hasOrigin(origin) || !url.encodedPath.startsWith(prefix) ||
+                if (url == null || !url.hasWenkuOrigin(origin) || !url.encodedPath.startsWith(prefix) ||
                     !CHAPTER_FILE.matches(url.encodedPath.removePrefix(prefix))
                 ) {
                     structure("目录中的章节地址不符合预期")
@@ -132,8 +114,6 @@ internal object WenkuParser {
         return chapters.distinctBy { it.path }
     }
 
-    private fun HttpUrl.hasOrigin(origin: HttpUrl): Boolean = isHttps && host == origin.host && port == origin.port
-
     private fun Element.field(label: String): String? {
         val text = ownText()
         return text.substringAfter('：', "").trim().takeIf { text.startsWith("$label：") && it.isNotEmpty() }
@@ -141,7 +121,7 @@ internal object WenkuParser {
 
     private fun structure(message: String): Nothing = throw WenkuAccessException(AccessFailure.STRUCTURE, message)
 
-    private val BOOK_PATH = Regex("/book/(\\d+)\\.htm")
+    val BOOK_PATH = Regex("/book/(\\d+)\\.htm")
     private val CATALOG_PATH = Regex("/novel/(\\d+)/(\\d+)/index\\.htm")
     private val CHAPTER_FILE = Regex("\\d+\\.htm")
 }

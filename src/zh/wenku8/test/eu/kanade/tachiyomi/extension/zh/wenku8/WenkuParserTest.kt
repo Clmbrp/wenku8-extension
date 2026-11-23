@@ -18,19 +18,6 @@ class WenkuParserTest {
     }
 
     @Test
-    fun `ranking extracts full title and HTTPS cover without fetching each book`() {
-        val doc = Jsoup.parse(
-            """<div class="blocktop"><div class="blockcaption">总热度榜</div><div class="blockcontent"><ul class="ultop">
-              <li><a href="/book/1973.htm" tiptitle="示例书完整书名">示例</a></li></ul></div></div>""",
-            origin.resolve("/top.php").toString(),
-        )
-        val book = WenkuParser.totalRanking(doc, origin.host).single()
-        assertEquals("示例书完整书名", book.title)
-        assertEquals("/book/1973.htm", book.path)
-        assertEquals("https://img.wenku8.com/image/1/1973/1973s.jpg", book.coverUrl)
-    }
-
-    @Test
     fun `detail resolves only the book's catalog and normalizes the site's cover to HTTPS`() {
         val doc = Jsoup.parse(
             """<div id="content"><table><tr><td><span><b>示例小说</b></span></td></tr>

@@ -39,22 +39,24 @@ class WenkuAccessTest {
             .build()
 
     @Test
-    fun `redirected GBK page is decoded and only total ranking is parsed`() = runBlocking {
+    fun `redirected GBK page is decoded from the HTML declaration`() = runBlocking {
         val visited = mutableListOf<String>()
-        val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { url ->
+        val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { request ->
+            val url = request.url
             visited += url.encodedPath
             if (url.encodedPath == "/top.php") response(url, 302, location = "/rank")
             else response(url, 200, ranking.toByteArray(charset("GBK")))
         }
         val page = pages.get("/top.php")
         assertEquals(listOf("/top.php", "/rank"), visited)
-        assertEquals(listOf(WenkuBook("完整书名", "/book/42.htm")), WenkuParser.totalRanking(page, origin.host))
+        assertEquals("完整书名", page.selectFirst(".ultop a")?.attr("tiptitle"))
     }
 
     @Test
     fun `external redirect is stopped before requesting it`() {
         val seen = mutableListOf<String>()
-        val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { url ->
+        val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { request ->
+            val url = request.url
             seen += url.host
             response(url, 302, location = "https://other.example/login")
         }
@@ -66,7 +68,8 @@ class WenkuAccessTest {
     @Test
     fun `same host http login redirect asks for login without requesting http`() {
         val seen = mutableListOf<String>()
-        val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { url ->
+        val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { request ->
+            val url = request.url
             seen += url.toString()
             response(url, 302, location = "http://www.wenku8.net/login.php?jumpurl=http%3A%2F%2Fwww.wenku8.net%2Findex.php")
         }
@@ -79,7 +82,8 @@ class WenkuAccessTest {
     fun `untrusted http redirects remain blocked`() {
         for (location in listOf("http://other.example/login.php", "http://www.wenku8.net/other", "http://www.wenku8.net:8080/login.php")) {
             val seen = mutableListOf<String>()
-            val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { url ->
+            val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { request ->
+                val url = request.url
                 seen += url.toString()
                 response(url, 302, location = location)
             }
@@ -98,9 +102,9 @@ class WenkuAccessTest {
             )
         }
         var requests = 0
-        val pages = WenkuPages(OkHttpClient.Builder().cookieJar(jar).build(), headersOf(), origin) { url ->
+        val pages = WenkuPages(OkHttpClient.Builder().cookieJar(jar).build(), headersOf(), origin) { request ->
             requests++
-            response(url, 302, location = "http://www.wenku8.net/login.php")
+            response(request.url, 302, location = "http://www.wenku8.net/login.php")
         }
         val error = assertThrows(WenkuAccessException::class.java) { runBlocking { pages.get("/top.php") } }
         assertEquals(AccessFailure.SESSION_EXPIRED, error.failure)
@@ -122,7 +126,8 @@ class WenkuAccessTest {
             }
         }
         val visited = mutableListOf<HttpUrl>()
-        val pages = WenkuPages(OkHttpClient.Builder().cookieJar(jar).build(), headersOf(), origin) { url ->
+        val pages = WenkuPages(OkHttpClient.Builder().cookieJar(jar).build(), headersOf(), origin) { request ->
+            val url = request.url
             visited += url
             response(url, 302, location = "/login.php?jumpurl=%2Ftop.php")
         }
@@ -145,7 +150,7 @@ class WenkuAccessTest {
             Triple(200, "<title>Just a moment...</title>", AccessFailure.CHALLENGE),
             Triple(429, "<title>Just a moment...</title>", AccessFailure.RATE_LIMITED),
         )) {
-            val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { url -> response(url, status, html.toByteArray()) }
+            val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { response(it.url, status, html.toByteArray()) }
             val error = assertThrows(WenkuAccessException::class.java) { runBlocking { pages.get("/top.php") } }
             assertEquals(expected, error.failure)
         }
@@ -157,8 +162,8 @@ class WenkuAccessTest {
     @Test
     fun `explicit challenge header rejects even successful ranking markup`() {
         val logs = mutableListOf<String>()
-        val pages = WenkuPages(OkHttpClient(), headersOf(), origin, WenkuDiagnostics { logs += it }) { url ->
-            response(url, 200, ranking.toByteArray(charset("GBK"))).newBuilder().header("cf-mitigated", "challenge").build()
+        val pages = WenkuPages(OkHttpClient(), headersOf(), origin, WenkuDiagnostics { logs += it }) {
+            response(it.url, 200, ranking.toByteArray(charset("GBK"))).newBuilder().header("cf-mitigated", "challenge").build()
         }
         val error = assertThrows(WenkuAccessException::class.java) { runBlocking { pages.get("/top.php") } }
         assertEquals(AccessFailure.CHALLENGE, error.failure)
@@ -201,7 +206,7 @@ class WenkuAccessTest {
                     emptyList()
                 }
             }
-            val pages = WenkuPages(OkHttpClient.Builder().cookieJar(jar).build(), headersOf(), origin) { url -> response(url, 200, login) }
+            val pages = WenkuPages(OkHttpClient.Builder().cookieJar(jar).build(), headersOf(), origin) { response(it.url, 200, login) }
             val error = assertThrows(WenkuAccessException::class.java) { runBlocking { pages.get("/top.php") } }
             assertEquals(if (hasCookie) AccessFailure.SESSION_EXPIRED else AccessFailure.LOGIN_REQUIRED, error.failure)
         }
@@ -209,9 +214,9 @@ class WenkuAccessTest {
 
     @Test
     fun `unexpected html is an error rather than an empty ranking`() {
-        val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { url -> response(url, 200, "<h1>changed</h1>".toByteArray()) }
+        val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { response(it.url, 200, "<h1>changed</h1>".toByteArray()) }
         val error = assertThrows(WenkuAccessException::class.java) {
-            runBlocking { WenkuParser.totalRanking(pages.get("/top.php"), origin.host) }
+            runBlocking { WenkuBrowse(pages, origin).popular(1) }
         }
         assertEquals(AccessFailure.STRUCTURE, error.failure)
     }

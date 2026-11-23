@@ -24,7 +24,7 @@ internal fun wenkuWebViewPath(mode: String?): String = if (mode == VALIDATION_EN
 abstract class Wenku8 :
     HttpSource(),
     ConfigurableSource {
-    override val supportsLatest = false
+    override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
 
@@ -56,32 +56,24 @@ abstract class Wenku8 :
     }.build()
 
     private val pages by lazy { WenkuPages(client, headers, baseUrl.siteUrl(), diagnostics) }
+    private val browse by lazy { WenkuBrowse(pages, baseUrl.siteUrl()) }
 
-    override suspend fun getPopularManga(page: Int): MangasPage {
-        if (page != 1) throw WenkuAccessException(AccessFailure.STRUCTURE, "总热度榜没有更多页面")
-        val html = pages.get("/top.php")
-        val books = try {
-            WenkuParser.totalRanking(html, baseUrl.siteUrl().host)
-        } catch (e: WenkuAccessException) {
-            diagnostics?.result("ranking", e.failure.name)
-            throw e
-        }
-        diagnostics?.result("ranking", "RANKING_HTML")
-        return MangasPage(
-            books.map { book ->
-                SManga.create().apply {
-                    title = book.title
-                    url = book.path
-                    thumbnail_url = book.coverUrl
-                }
-            },
-            false,
-        )
-    }
+    override suspend fun getPopularManga(page: Int): MangasPage = browse.popular(page).toMangasPage()
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage = notImplemented()
+    override suspend fun getLatestUpdates(page: Int): MangasPage = browse.latest(page).toMangasPage()
 
-    override suspend fun getSearchManga(page: Int, query: String, filters: FilterList): MangasPage = notImplemented()
+    override suspend fun getSearchManga(page: Int, query: String, filters: FilterList): MangasPage = browse.search(page, query).toMangasPage()
+
+    private fun WenkuBookPage.toMangasPage(): MangasPage = MangasPage(
+        books.map { book ->
+            SManga.create().apply {
+                title = book.title
+                url = book.path
+                thumbnail_url = book.coverUrl
+            }
+        },
+        hasNextPage,
+    )
 
     override suspend fun getMangaUpdate(
         manga: SManga,

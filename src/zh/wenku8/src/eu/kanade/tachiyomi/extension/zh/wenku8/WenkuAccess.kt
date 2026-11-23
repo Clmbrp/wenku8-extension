@@ -1,6 +1,6 @@
 package eu.kanade.tachiyomi.extension.zh.wenku8
 
-import keiyoushi.network.get
+import eu.kanade.tachiyomi.network.await
 import okhttp3.CacheControl
 import okhttp3.CookieJar
 import okhttp3.Headers
@@ -8,6 +8,8 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -83,7 +85,7 @@ internal class WenkuPages(
     private val headers: Headers,
     private val origin: HttpUrl,
     private val diagnostics: WenkuDiagnostics? = null,
-    private val request: (suspend (HttpUrl) -> Response)? = null,
+    private val executeRequest: (suspend (Request) -> Response)? = null,
 ) {
     private val client = client.newBuilder()
         .followRedirects(false)
@@ -102,20 +104,34 @@ internal class WenkuPages(
         .build()
     private val session = WenkuSession(client.cookieJar)
 
-    suspend fun get(path: String): Document {
+    suspend fun get(path: String): Document = load(path)
+
+    suspend fun searchForm(body: RequestBody): Document = load(WenkuBrowse.SEARCH_FORM, body)
+
+    private suspend fun load(path: String, form: RequestBody? = null): Document {
         var url = origin.resolve(path) ?: throw WenkuAccessException(AccessFailure.STRUCTURE, "页面地址无效")
+        var body = form
         var stage = "redirect"
         try {
             repeat(6) { count ->
                 stage = "redirect"
-                if (url.scheme != "https" || url.host != origin.host || url.port != origin.port) {
+                if (!url.hasWenkuOrigin(origin)) {
                     throw WenkuAccessException(AccessFailure.STRUCTURE, "页面跳转到未验证的站点")
                 }
                 stage = "session"
                 val hadLoginCookie = session.hasLoginCookie(url)
                 diagnostics?.session(url, hadLoginCookie)
                 stage = "request"
-                (request?.invoke(url) ?: client.get(url, headers, cacheControl = CacheControl.FORCE_NETWORK, ensureSuccess = false)).use { response ->
+                val request = Request.Builder().url(url).headers(headers)
+                val currentBody = body
+                if (currentBody == null) {
+                    request.cacheControl(CacheControl.FORCE_NETWORK)
+                } else {
+                    request.post(currentBody)
+                }
+                val outbound = request.build()
+                val response = executeRequest?.invoke(outbound) ?: client.newCall(outbound).await()
+                response.use {
                     val challengeHeader = response.header("cf-mitigated")?.equals("challenge", true) == true
                     diagnostics?.response(url, response.code, challengeHeader)
                     stage = "response"
@@ -131,6 +147,12 @@ internal class WenkuPages(
                             ((next.scheme == "http" && next.port == 80) || (next.scheme == "https" && next.port == origin.port))
                         if (isLoginTarget) {
                             WenkuErrors.loginRequired(hadLoginCookie)
+                        }
+                        if (body != null) {
+                            if (response.code == 307 || response.code == 308) {
+                                throw WenkuAccessException(AccessFailure.STRUCTURE, "搜索表单返回了未预期的重定向")
+                            }
+                            body = null
                         }
                         url = next
                         if (count == 5) throw WenkuAccessException(AccessFailure.STRUCTURE, "页面跳转次数过多")
@@ -175,3 +197,6 @@ internal class WenkuPages(
 }
 
 internal fun String.siteUrl(): HttpUrl = toHttpUrl()
+
+internal fun HttpUrl.hasWenkuOrigin(origin: HttpUrl): Boolean = isHttps && host == origin.host && port == origin.port &&
+    username.isEmpty() && password.isEmpty()

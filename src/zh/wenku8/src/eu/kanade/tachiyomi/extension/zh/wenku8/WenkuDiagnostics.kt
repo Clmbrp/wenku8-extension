@@ -59,6 +59,6 @@ internal class WenkuDiagnostics(private val log: (String) -> Unit) {
 
     companion object {
         const val TAG = "Wenku8Access"
-        private val SAFE_PATHS = setOf("/", "/index.php", "/top.php", "/login.php")
+        private val SAFE_PATHS = setOf("/", "/index.php", "/top.php", "/login.php", "/so.php", "/modules/article/search.php", "/modules/article/toplist.php")
     }
 }

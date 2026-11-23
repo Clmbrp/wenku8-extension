@@ -13,7 +13,10 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
+import keiyoushi.utils.applicationContext
 import keiyoushi.utils.getPreferencesLazy
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import java.io.File
 
 private const val WEBVIEW_ENTRY = "wenku8_webview_entry"
 private const val VALIDATION_ENTRY = "security"
@@ -49,6 +52,9 @@ abstract class Wenku8 :
     // The host's Cloudflare interceptor may start an automated background WebView. This source
     // only allows user-initiated interaction in the host WebView. Preserve the host cookie jar.
     override val client = super.client.newBuilder().apply {
+        interceptors().add(0) { chain ->
+            if (chain.request().url.host == WenkuPageRef.HOST) reader.intercept(chain) else chain.proceed(chain.request())
+        }
         interceptors().removeAll { it.javaClass.name == "eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor" }
         interceptors().removeAll { it.javaClass.name == "okhttp3.logging.HttpLoggingInterceptor" }
         networkInterceptors().removeAll { it.javaClass.name == "okhttp3.logging.HttpLoggingInterceptor" }
@@ -57,6 +63,9 @@ abstract class Wenku8 :
 
     private val pages by lazy { WenkuPages(client, headers, baseUrl.siteUrl(), diagnostics) }
     private val browse by lazy { WenkuBrowse(pages, baseUrl.siteUrl(), diagnostics) }
+    private val reader: WenkuReader by lazy {
+        WenkuReader(pages, baseUrl.siteUrl(), WenkuTextCache(File(applicationContext.cacheDir, "wenku8-text-v1-$id")))
+    }
 
     override suspend fun getPopularManga(page: Int): MangasPage = browse.popular(page).toMangasPage()
 
@@ -116,9 +125,13 @@ abstract class Wenku8 :
         return SMangaUpdate(updated, chapterList)
     }
 
-    override suspend fun getPageList(chapter: SChapter): List<Page> = notImplemented()
+    override suspend fun getPageList(chapter: SChapter): List<Page> = reader.pageUrls(chapter.url).mapIndexed { index, url -> Page(index, url) }
 
-    override suspend fun getImageUrl(page: Page): String = notImplemented()
-
-    private fun notImplemented(): Nothing = throw UnsupportedOperationException("轻小说文库尚未实现")
+    override suspend fun getImageUrl(page: Page): String {
+        val url = page.url.toHttpUrlOrNull()
+        if (url == null || WenkuPageRef.parse(url) == null) {
+            throw WenkuAccessException(AccessFailure.STRUCTURE, "阅读页地址无效，请重新打开章节")
+        }
+        return page.url
+    }
 }

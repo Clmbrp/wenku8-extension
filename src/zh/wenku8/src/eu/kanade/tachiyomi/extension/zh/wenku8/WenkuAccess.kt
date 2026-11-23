@@ -9,6 +9,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import okhttp3.CacheControl
 import okhttp3.CookieJar
+import okhttp3.Dispatcher
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -108,6 +109,8 @@ internal class WenkuPages(
     private val executeRequest: (suspend (Request) -> Response)? = null,
 ) {
     private val client = client.newBuilder()
+        // Serve chapter recovery even when the reader's image dispatcher is full.
+        .dispatcher(Dispatcher())
         .followRedirects(false)
         .followSslRedirects(false)
         .retryOnConnectionFailure(false)

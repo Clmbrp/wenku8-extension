@@ -96,6 +96,12 @@
 - **[1.6.9 策略]** 普通 HTML 请求仍按 2 秒间隔起发，搜索结果端点单独间隔至少 6.5 秒。6.5 秒是根据上述观测选择的客户端初始值。对站点已公告且通过 URL 验证的后续页，收到成功响应但缺少可识别书目时最多延后重取一次。明确空结果直接结束，登录、验证、外域和真实解析错误仍按各自分支处理。
 - **[1.6.9 交互]** 请求在服务器冷却期内挂起，Mihon 继续显示加载状态。明确限流时按 `Retry-After` 等待，无有效响应头时等待 30 秒，之后同一请求最多自动恢复一次。持续限流才报告本次加载失败。等待中的搜索页会让出请求队列，普通请求可使用更早的可用时隙，离开页面会取消无人等待的任务。LightNovelReader 将正常间隔和全局冷却分开；LiteTale 记录主机冷却截止时间，Rust GET 网络错误重试另有次数和时间预算。 [LightNovelReader RateLimiter](https://github.com/Xempastissimo/LightNovelReader/blob/master/app/src/main/java/com/xempastissimo/lightnovelreader/data/network/RateLimiter.kt) · [LiteTale 冷却](https://github.com/metaMMY07/LiteTale/blob/ab4129b56e8825d375979d8f8dff77dfd44a1266/lib/services/wenku8_rate_limit.dart) · [LiteTale 请求策略](https://github.com/metaMMY07/LiteTale/blob/ab4129b56e8825d375979d8f8dff77dfd44a1266/rust/src/request_policy.rs)
 
+## 阶段 4.1 章节正文
+
+- **[样本]** 文字和纯插图章节保存样本均以 `#contentmain` 包裹 `#title`、广告及 `#content`。正文区域的头尾各有 `ul#contentdp`。正文文本通过 HTML 实体、缩进和 `br` 分隔。插图样本中 `div.divimage img.imagecontent` 直接给出 6 张图片的地址。
+- **[已实现／模拟测试]** 读取章节时使用阶段 3 的 HTTPS、会话、编码与冷却策略。只有结构匹配的章节正文进入有序内容模型。登录、Cloudflare、429、连接失败或缺少内容分别报错。固定样式只渲染文字，解析出的插图链接不发起请求。
+- **[源码与许可]** BiliNovel App 版先把章节数据转换为内联文本，再通过 `TextInterceptor.prepare()` 分页；拦截器从本地页面 URL 还原排版并绘制 PNG。公共 `lib/textinterceptor` 同样使用 Android 排版，但直接绘制整段单图。Wenku8 在仓库 Apache-2.0 许可下改编了 BiliNovel 的 `StaticLayout`／`Canvas` 绘制方式，按实际行边界切页并使用不含正文的本地 URL。两份现有实现及其网络接口保持独立。 [仓库许可](../LICENSE) · [BiliNovel 渲染器](../src/zh/bilinovel/src/eu/kanade/tachiyomi/extension/zh/bilinovel/TextInterceptor.kt) · [公共拦截器](../lib/textinterceptor/src/keiyoushi/lib/textinterceptor/TextInterceptor.kt)
+
 ## 开源项目证据与界限
 
 1. **LightNovelReader**：**[源码]** [地址及编码](https://github.com/Xempastissimo/LightNovelReader/blob/16ebd0dd2ee82c7cc159595f9e26e8cab1dfda50/app/src/main/java/com/xempastissimo/lightnovelreader/data/source/wenku8/Wenku8Urls.kt)、[选择器](https://github.com/Xempastissimo/LightNovelReader/blob/16ebd0dd2ee82c7cc159595f9e26e8cab1dfda50/app/src/main/java/com/xempastissimo/lightnovelreader/data/source/wenku8/Wenku8Selectors.kt)、[来源流程](https://github.com/Xempastissimo/LightNovelReader/blob/16ebd0dd2ee82c7cc159595f9e26e8cab1dfda50/app/src/main/java/com/xempastissimo/lightnovelreader/data/source/wenku8/Wenku8Source.kt)。榜单、搜索、详情、目录及正文均为网页 HTML；登录有表单和浏览器路径、保存站点 Cookie，正文含图片。其 [网络说明](https://github.com/Xempastissimo/LightNovelReader/blob/16ebd0dd2ee82c7cc159595f9e26e8cab1dfda50/README.md) 记载 HTML 使用 WebView、普通客户端可能被拦截，Cookie 未必充分；其浏览器抓取能力是该独立 App 的实现，不能假设 Mihon 扩展有同等能力。

@@ -6,6 +6,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.Call
@@ -19,9 +21,21 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
 import kotlin.coroutines.cancellation.CancellationException
 
-internal class WenkuReader(private val pages: WenkuPages, private val origin: HttpUrl, private val cache: WenkuTextCache) {
+internal class WenkuReader(
+    private val pages: WenkuPages,
+    private val origin: HttpUrl,
+    private val cache: WenkuTextCache,
+    private val fetchIllustration: suspend (String) -> ByteArray,
+) {
+    private sealed interface RenderPage {
+        data class Text(val chapter: WenkuTextRenderer.Chapter, val index: Int) : RenderPage
+        data class Illustration(val url: String, val title: String) : RenderPage
+    }
+
+    private val renderer = WenkuTextRenderer()
     private val renderLock = Any()
-    private val layouts = LinkedHashMap<WenkuTextKey, WenkuTextRenderer.Chapter>(4, 0.75f, true)
+    private val illustrationSlots = Semaphore(2)
+    private val layouts = LinkedHashMap<WenkuTextKey, List<RenderPage>>(4, 0.75f, true)
     private val images = LinkedHashMap<WenkuPageRef, ByteArray>(16, 0.75f, true)
     private var imageBytes = 0
 
@@ -31,7 +45,7 @@ internal class WenkuReader(private val pages: WenkuPages, private val origin: Ht
         val path = url.encodedPath
         val content = cache.fresh(path) ?: fetch(path)
         val chapter = prepare(content)
-        List(chapter.pageCount) { WenkuPageRef(content.key, it).url() }
+        List(chapter.size) { WenkuPageRef(content.key, it).url() }
     }
 
     fun intercept(chain: Interceptor.Chain): Response {
@@ -61,29 +75,47 @@ internal class WenkuReader(private val pages: WenkuPages, private val origin: Ht
 
     private fun image(page: WenkuPageRef, call: Call): ByteArray {
         synchronized(renderLock) { images[page]?.let { return it } }
-        val prepared = synchronized(renderLock) { layouts[page.key] }
+        val plan = synchronized(renderLock) { layouts[page.key] }
             ?: prepare(cache.read(page.key) ?: recover(page.key, call))
-        return synchronized(renderLock) {
-            images[page]?.let { return@synchronized it }
-            if (call.isCanceled()) throw IOException("阅读页加载已取消")
-            val png = prepared.png(page.index)
-            if (png.size <= MAX_IMAGE_BYTES) {
-                images[page] = png
-                imageBytes += png.size
-                while (images.size > MAX_IMAGES || imageBytes > MAX_IMAGE_BYTES) {
-                    val oldest = images.entries.iterator()
-                    imageBytes -= oldest.next().value.size
-                    oldest.remove()
+        val entry = plan.getOrNull(page.index) ?: throw IOException("阅读页不存在，请重新打开章节")
+        return when (entry) {
+            is RenderPage.Text -> renderImage(page, call) { entry.chapter.png(entry.index) }
+            is RenderPage.Illustration -> runForPage(call) {
+                illustrationSlots.withPermit {
+                    synchronized(renderLock) { images[page] }?.let { return@withPermit it }
+                    val data = fetchIllustration(entry.url)
+                    renderImage(page, call) { wenkuIllustrationPng(data, entry.title, renderer) }
                 }
             }
-            png
         }
     }
 
-    private fun prepare(content: WenkuCachedText): WenkuTextRenderer.Chapter = synchronized(renderLock) {
+    private fun renderImage(page: WenkuPageRef, call: Call, render: () -> ByteArray): ByteArray = synchronized(renderLock) {
+        images[page]?.let { return@synchronized it }
+        if (call.isCanceled()) throw IOException("阅读页加载已取消")
+        val png = render()
+        if (png.size <= MAX_IMAGE_BYTES) {
+            images[page] = png
+            imageBytes += png.size
+            while (images.size > MAX_IMAGES || imageBytes > MAX_IMAGE_BYTES) {
+                val oldest = images.entries.iterator()
+                imageBytes -= oldest.next().value.size
+                oldest.remove()
+            }
+        }
+        png
+    }
+
+    private fun prepare(content: WenkuCachedChapter): List<RenderPage> = synchronized(renderLock) {
         layouts[content.key]?.let { return@synchronized it }
         val chapter = try {
-            WenkuTextRenderer.prepare(content.text)
+            content.content.readerPages<RenderPage>(
+                textPages = {
+                    val layout = renderer.prepare(it)
+                    List(layout.pageCount) { index -> RenderPage.Text(layout, index) }
+                },
+                illustrationPage = { image, title -> RenderPage.Illustration(image.url, title) },
+            )
         } catch (error: OutOfMemoryError) {
             throw IOException("设备内存不足，无法排版该章节", error)
         } catch (error: RuntimeException) {
@@ -94,25 +126,31 @@ internal class WenkuReader(private val pages: WenkuPages, private val origin: Ht
         chapter
     }
 
-    private suspend fun fetch(path: String): WenkuCachedText {
+    private suspend fun fetch(path: String, legacyText: Boolean = false): WenkuCachedChapter {
         val document = pages.get(path)
         if (document.location().toHttpUrlOrNull()?.encodedPath != path) {
             throw WenkuAccessException(AccessFailure.STRUCTURE, "站点返回了其他页面，无法识别本章正文")
         }
-        val text = WenkuChapterParser.parse(document).textForReader()
-        return cache.remember(path, text)
+        val content = WenkuChapterParser.parse(document)
+        val snapshot = cache.remember(path, content)
+        return if (legacyText && snapshot.key.version == 2) cache.legacySnapshot(path, content) else snapshot
     }
 
     /** Mihon may keep a page list longer than the source's copy of the chapter. */
-    private fun recover(key: WenkuTextKey, call: Call): WenkuCachedText = runBlocking {
+    private fun recover(key: WenkuTextKey, call: Call): WenkuCachedChapter = runForPage(call) {
+        val content = fetch(key.chapterPath, legacyText = key.version == 1)
+        if (content.key != key) throw IOException("章节内容已更新，请刷新章节页面列表")
+        content
+    }
+
+    private fun <T> runForPage(call: Call, block: suspend () -> T): T = runBlocking {
+        if (call.isCanceled()) throw IOException("阅读页加载已取消")
         val watcher = launch {
             while (!call.isCanceled()) delay(200)
             this@runBlocking.cancel()
         }
         try {
-            val content = withTimeout(45_000L) { fetch(key.chapterPath) }
-            if (content.key != key) throw IOException("章节内容已更新，请刷新章节页面列表")
-            content
+            withTimeout(45_000L) { block() }
         } finally {
             watcher.cancel()
         }

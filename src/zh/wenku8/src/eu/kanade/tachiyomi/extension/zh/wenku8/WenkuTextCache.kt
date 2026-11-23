@@ -1,5 +1,9 @@
 package eu.kanade.tachiyomi.extension.zh.wenku8
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okio.ByteString.Companion.toByteString
@@ -10,72 +14,106 @@ import java.nio.file.StandardCopyOption
 
 internal val WENKU_CHAPTER_PATH = Regex("/novel/\\d+/\\d+/\\d+\\.htm")
 
-internal data class WenkuTextKey(val chapterPath: String, val revision: String)
+internal data class WenkuTextKey(val chapterPath: String, val revision: String, val version: Int = 1)
 
 internal data class WenkuPageRef(val key: WenkuTextKey, val index: Int) {
-    fun url(): String = "$ORIGIN$VERSION${key.chapterPath}/${key.revision}/$index.png"
+    fun url(): String = "${ORIGIN}v${key.version}${key.chapterPath}/${key.revision}/$index.png"
 
     companion object {
         const val HOST = "wenku8-reader.invalid"
         private const val ORIGIN = "https://$HOST/"
-        private const val VERSION = "v1"
         private val ROOT = ORIGIN.toHttpUrl()
-        private val PATH = Regex("/$VERSION(/novel/\\d+/\\d+/\\d+\\.htm)/([a-f0-9]{64})/(\\d+)\\.png")
+        private val PATH = Regex("/v([12])(/novel/\\d+/\\d+/\\d+\\.htm)/([a-f0-9]{64})/(\\d+)\\.png")
 
         fun parse(url: HttpUrl): WenkuPageRef? {
             if (!url.hasWenkuOrigin(ROOT) || url.query != null || url.fragment != null) return null
             val match = PATH.matchEntire(url.encodedPath) ?: return null
-            val (chapter, revision, index) = match.destructured
-            return WenkuPageRef(WenkuTextKey(chapter, revision), index.toIntOrNull() ?: return null)
+            val (version, chapter, revision, index) = match.destructured
+            return WenkuPageRef(WenkuTextKey(chapter, revision, version.toInt()), index.toIntOrNull() ?: return null)
         }
     }
 }
 
-internal data class WenkuCachedText(val key: WenkuTextKey, val text: WenkuChapterText)
+internal data class WenkuCachedChapter(val key: WenkuTextKey, val content: WenkuChapterContent)
 
 /** Bounded reader cache, separate from Mihon's reading history and image cache. */
 internal class WenkuTextCache(
     private val directory: File,
     private val now: () -> Long = System::currentTimeMillis,
+    private val legacyDirectory: File? = null,
 ) {
     @Synchronized
-    fun fresh(chapterPath: String): WenkuCachedText? {
+    fun fresh(chapterPath: String): WenkuCachedChapter? {
         val prefix = filePrefix(chapterPath)
         return entries().asSequence().filter { it.name.startsWith(prefix) }
             .filter { now() - it.lastModified() in 0..FRESH_MILLIS }
             .sortedByDescending(File::lastModified)
-            .firstNotNullOfOrNull { file -> read(WenkuTextKey(chapterPath, file.name.removePrefix(prefix).removeSuffix(".txt"))) }
+            .firstNotNullOfOrNull { file ->
+                val version = if (file.extension == "json") 2 else 1
+                readFile(WenkuTextKey(chapterPath, file.nameWithoutExtension.removePrefix(prefix), version), file)
+            }
     }
 
     @Synchronized
-    fun read(key: WenkuTextKey): WenkuCachedText? {
+    fun read(key: WenkuTextKey): WenkuCachedChapter? {
         if (!REVISION.matches(key.revision)) return null
-        val file = file(key)
+        return readFile(key, File(directory, fileName(key)))
+            ?: legacyDirectory?.takeIf { key.version == 1 }?.let { readFile(key, File(it, fileName(key))) }
+    }
+
+    private fun readFile(key: WenkuTextKey, file: File): WenkuCachedChapter? {
         try {
             if (file.length() !in 1L..MAX_ENTRY_BYTES) return null
             val bytes = file.readBytes()
             if (digest(bytes) != key.revision) return null
             val data = bytes.toString(Charsets.UTF_8)
-            val title = data.substringBefore('\n')
-            val body = data.substringAfter('\n', "")
-            if (title.isBlank() || body.isBlank()) return null
-            return WenkuCachedText(key, WenkuChapterText(title, body))
+            val content = if (key.version == 2) {
+                decodeChapter(data)
+            } else {
+                val title = data.substringBefore('\n')
+                val body = data.substringAfter('\n', "")
+                if (title.isBlank() || body.isBlank()) return null
+                WenkuChapterContent(title, listOf(WenkuContentBlock.TextBlock(body)))
+            } ?: return null
+            return WenkuCachedChapter(key, content)
         } catch (_: IOException) {
+            return null
+        } catch (_: IllegalArgumentException) {
             return null
         }
     }
 
+    fun remember(chapterPath: String, text: WenkuChapterText): WenkuCachedChapter = remember(chapterPath, WenkuChapterContent(text.title, listOf(WenkuContentBlock.TextBlock(text.body))))
+
+    fun legacySnapshot(chapterPath: String, content: WenkuChapterContent): WenkuCachedChapter {
+        val text = content.textForReader()
+        val snapshot = WenkuChapterContent(text.title, listOf(WenkuContentBlock.TextBlock(text.body)))
+        // A text-only recovery for an old URL must not replace the mixed layout on the next open.
+        return WenkuCachedChapter(WenkuTextKey(chapterPath, digest(encodeText(text))), snapshot)
+    }
+
     @Synchronized
-    fun remember(chapterPath: String, text: WenkuChapterText): WenkuCachedText {
-        val bytes = "${text.title}\n${text.body}".encodeToByteArray()
-        val key = WenkuTextKey(chapterPath, digest(bytes))
+    fun remember(chapterPath: String, content: WenkuChapterContent): WenkuCachedChapter {
+        val mixed = content.blocks.any { it is WenkuContentBlock.ImageBlock }
+        val stored = if (mixed) {
+            content
+        } else {
+            val text = content.textForReader()
+            WenkuChapterContent(text.title, listOf(WenkuContentBlock.TextBlock(text.body)))
+        }
+        val bytes = if (mixed) {
+            encodeChapter(stored).encodeToByteArray()
+        } else {
+            encodeText(stored.textForReader())
+        }
+        val key = WenkuTextKey(chapterPath, digest(bytes), if (mixed) 2 else 1)
         if (bytes.size <= MAX_ENTRY_BYTES) {
             try {
                 directory.mkdirs()
                 val pending = File.createTempFile("pending-", ".tmp", directory)
                 try {
                     pending.writeBytes(bytes)
-                    Files.move(pending.toPath(), file(key).toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                    Files.move(pending.toPath(), File(directory, fileName(key)).toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
                 } finally {
                     pending.delete()
                 }
@@ -84,7 +122,37 @@ internal class WenkuTextCache(
                 // Reading can still use the in-memory layout when app cache storage is unavailable.
             }
         }
-        return WenkuCachedText(key, text)
+        return WenkuCachedChapter(key, stored)
+    }
+
+    private fun encodeText(text: WenkuChapterText): ByteArray = "${text.title}\n${text.body}".encodeToByteArray()
+
+    private fun encodeChapter(content: WenkuChapterContent): String = JsonObject(
+        mapOf(
+            "title" to JsonPrimitive(content.title),
+            "blocks" to JsonArray(
+                content.blocks.map {
+                    when (it) {
+                        is WenkuContentBlock.TextBlock -> JsonObject(mapOf("text" to JsonPrimitive(it.text)))
+                        is WenkuContentBlock.ImageBlock -> JsonObject(mapOf("image" to JsonPrimitive(it.url)))
+                    }
+                },
+            ),
+        ),
+    ).toString()
+
+    private fun decodeChapter(data: String): WenkuChapterContent? {
+        val chapter = Json.parseToJsonElement(data) as? JsonObject ?: return null
+        val title = (chapter["title"] as? JsonPrimitive)?.content?.takeIf(String::isNotBlank) ?: return null
+        val blocks = (chapter["blocks"] as? JsonArray)?.map { node ->
+            val block = node as? JsonObject ?: return null
+            when (val field = block.keys.singleOrNull()) {
+                "text" -> WenkuContentBlock.TextBlock((block[field] as? JsonPrimitive)?.content ?: return null)
+                "image" -> WenkuContentBlock.ImageBlock((block[field] as? JsonPrimitive)?.content ?: return null)
+                else -> return null
+            }
+        } ?: return null
+        return WenkuChapterContent(title, blocks).takeIf { blocks.any { it is WenkuContentBlock.ImageBlock } }
     }
 
     private fun prune() {
@@ -97,7 +165,7 @@ internal class WenkuTextCache(
 
     private fun entries(): Array<out File> = directory.listFiles { file -> file.isFile && CACHE_FILE.matches(file.name) }.orEmpty()
 
-    private fun file(key: WenkuTextKey) = File(directory, "${filePrefix(key.chapterPath)}${key.revision}.txt")
+    private fun fileName(key: WenkuTextKey): String = "${filePrefix(key.chapterPath)}${key.revision}.${if (key.version == 2) "json" else "txt"}"
 
     private fun filePrefix(path: String): String {
         require(WENKU_CHAPTER_PATH.matches(path))
@@ -112,6 +180,6 @@ internal class WenkuTextCache(
         private const val MAX_ENTRIES = 24
         private const val MAX_CACHE_BYTES = 16 * 1_024 * 1_024L
         private val REVISION = Regex("[a-f0-9]{64}")
-        private val CACHE_FILE = Regex("\\d+-\\d+-\\d+-[a-f0-9]{64}\\.txt")
+        private val CACHE_FILE = Regex("\\d+-\\d+-\\d+-[a-f0-9]{64}\\.(txt|json)")
     }
 }

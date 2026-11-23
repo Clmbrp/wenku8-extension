@@ -56,10 +56,10 @@ internal class WenkuRequestPolicy(
         }
     }
 
-    suspend fun <T> exchange(searchResults: Boolean, load: suspend () -> T): T = try {
+    suspend fun <T> exchange(searchResults: Boolean, retryOnRateLimit: Boolean = true, load: suspend () -> T): T = try {
         dispatch(searchResults, load)
     } catch (e: WenkuAccessException) {
-        if (e.failure != AccessFailure.RATE_LIMITED) throw e
+        if (!retryOnRateLimit || e.failure != AccessFailure.RATE_LIMITED) throw e
         dispatch(searchResults, load)
     }
 

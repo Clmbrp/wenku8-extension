@@ -101,6 +101,13 @@
 - **[样本]** 文字和纯插图章节保存样本均以 `#contentmain` 包裹 `#title`、广告及 `#content`。正文区域的头尾各有 `ul#contentdp`。正文文本通过 HTML 实体、缩进和 `br` 分隔。插图样本中 `div.divimage img.imagecontent` 直接给出 6 张图片的地址。
 - **[已实现／模拟测试]** 读取章节时使用阶段 3 的 HTTPS、会话、编码与冷却策略。只有结构匹配的章节正文进入有序内容模型。登录、Cloudflare、429、连接失败或缺少内容分别报错。固定样式只渲染文字，解析出的插图链接不发起请求。
 - **[源码与许可]** BiliNovel App 版先把章节数据转换为内联文本，再通过 `TextInterceptor.prepare()` 分页；拦截器从本地页面 URL 还原排版并绘制 PNG。公共 `lib/textinterceptor` 同样使用 Android 排版，但直接绘制整段单图。Wenku8 在仓库 Apache-2.0 许可下改编了 BiliNovel 的 `StaticLayout`／`Canvas` 绘制方式，按实际行边界切页并使用不含正文的本地 URL。两份现有实现及其网络接口保持独立。 [仓库许可](../LICENSE) · [BiliNovel 渲染器](../src/zh/bilinovel/src/eu/kanade/tachiyomi/extension/zh/bilinovel/TextInterceptor.kt) · [公共拦截器](../lib/textinterceptor/src/keiyoushi/lib/textinterceptor/TextInterceptor.kt)
+- **[真机]** 1.6.10 用户已核对正文、长章翻页与重新打开，文字与网站一致。条漫截图中的章节过渡留到 4.2 核对。
+
+## 阶段 4.2 插图与图文混排
+
+- **[真实样本与有限联网]** 已保存的《化物语》卷首插图章给出 6 个 HTTPS JPEG 地址，主机为 `pic.777743.xyz`。仅抽查其中一张，电脑端收到 HTTP 200、JPEG、812 × 600 像素。此结果只覆盖该地址及当前出口。真实混排 HTML 与 Android 图片加载效果待真机验收。
+- **[源码与模拟验证]** 插图使用正文节点提供的地址，支持相对、协议相对和转义路径。生产请求验证每次 HTTPS 跳转。主站地址共享阶段 3 的节流与冷却。外部图床独立访问，省略主站请求头及 Cookie。插图 429 或非图片响应只使对应阅读页失败。图片不会随章节 HTML 一起下载。
+- **[源码与许可]** 参考仓库 Apache-2.0 下的 BiliNovel 当前 App 模式。App 分页先提交文字，再为插图建立独立图片页。Wenku8 在已验证的文字渲染器上加独立图片页，复用自己的文件与页面缓存。 [BiliNovel 章节结构](../src/zh/bilinovel/src/eu/kanade/tachiyomi/extension/zh/bilinovel/ChapterContent.kt) · [BiliNovel App 分页](../src/zh/bilinovel/src/eu/kanade/tachiyomi/extension/zh/bilinovel/TextInterceptor.kt) · [仓库许可](../LICENSE)
 
 ## 开源项目证据与界限
 

@@ -25,6 +25,24 @@ internal data class WenkuChapterContent(val title: String, val blocks: List<Wenk
 
 internal data class WenkuChapterText(val title: String, val body: String)
 
+/** Add the chapter title exactly once, even when the first page is an illustration. */
+internal fun <T> WenkuChapterContent.readerPages(
+    textPages: (WenkuChapterText) -> List<T>,
+    illustrationPage: (WenkuContentBlock.ImageBlock, String) -> T,
+): List<T> {
+    // Keep the exact 4.1 text and pagination for chapters without illustrations.
+    if (blocks.none { it is WenkuContentBlock.ImageBlock }) return textPages(textForReader())
+    return buildList {
+        for (block in blocks) {
+            val heading = if (isEmpty()) title else ""
+            when (block) {
+                is WenkuContentBlock.TextBlock -> addAll(textPages(WenkuChapterText(heading, block.text)))
+                is WenkuContentBlock.ImageBlock -> add(illustrationPage(block, heading))
+            }
+        }
+    }
+}
+
 internal object WenkuChapterParser {
     fun parse(document: Document): WenkuChapterContent {
         val shell = document.selectFirst("#contentmain")
@@ -60,11 +78,17 @@ internal object WenkuChapterParser {
             when (tag) {
                 "br" -> breaks = (breaks + 1).coerceAtMost(2)
                 "img" -> {
-                    val src = node.attr("src").ifBlank { node.attr("data-src") }.trim()
-                    val url = node.baseUri().toHttpUrlOrNull()?.resolve(src)
-                    if (src.isNotEmpty() && url != null && url.username.isEmpty() && url.password.isEmpty()) {
+                    if (node.attr("width").toIntOrNull() == 1 || node.attr("height").toIntOrNull() == 1) {
+                        return NodeFilter.FilterResult.SKIP_ENTIRELY
+                    }
+                    val base = node.baseUri().toHttpUrlOrNull()
+                    val url = sequenceOf("data-src", "src")
+                        .map { node.attr(it).trim() }.filter(String::isNotEmpty)
+                        .mapNotNull { base?.resolve(it) }
+                        .firstOrNull { it.username.isEmpty() && it.password.isEmpty() }
+                    if (url != null) {
                         flush()
-                        blocks += WenkuContentBlock.ImageBlock(url.toString())
+                        blocks += WenkuContentBlock.ImageBlock(url.newBuilder().fragment(null).build().toString())
                     }
                 }
                 else -> if (tag in PARAGRAPH_TAGS) breaks = 2
@@ -106,7 +130,7 @@ internal object WenkuChapterParser {
     private val PARAGRAPH_TAGS = setOf("p", "div", "blockquote", "li", "section", "article")
     private val SKIPPED_TAGS = setOf("nav", "script", "style", "iframe", "noscript", "button", "form")
     private val SKIPPED_IDS = setOf("contentdp", "footlink", "title")
-    private val SKIPPED_CLASSES = setOf("ad", "ads", "advertisement", "chapter-nav")
+    private val SKIPPED_CLASSES = setOf("ad", "ads", "advertisement", "chapter-nav", "icon", "site-logo")
     private val AD_ID = Regex("adv\\d+")
     private val NAVIGATION_LABELS = setOf("上一页", "下一页", "上一章", "下一章", "返回目录", "上一頁", "下一頁", "返回目錄")
 }

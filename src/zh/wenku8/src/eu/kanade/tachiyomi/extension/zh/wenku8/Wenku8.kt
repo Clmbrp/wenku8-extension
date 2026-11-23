@@ -64,7 +64,10 @@ abstract class Wenku8 :
     private val pages by lazy { WenkuPages(client, headers, baseUrl.siteUrl(), diagnostics) }
     private val browse by lazy { WenkuBrowse(pages, baseUrl.siteUrl(), diagnostics) }
     private val reader: WenkuReader by lazy {
-        WenkuReader(pages, baseUrl.siteUrl(), WenkuTextCache(File(applicationContext.cacheDir, "wenku8-text-v1-$id")))
+        val origin = baseUrl.siteUrl()
+        val cacheDir = applicationContext.cacheDir
+        val cache = WenkuTextCache(File(cacheDir, "wenku8-reader-v2-$id"), legacyDirectory = File(cacheDir, "wenku8-text-v1-$id"))
+        WenkuReader(pages, origin, cache, WenkuIllustrations(client, pages, origin)::fetch)
     }
 
     override suspend fun getPopularManga(page: Int): MangasPage = browse.popular(page).toMangasPage()

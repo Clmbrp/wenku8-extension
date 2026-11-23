@@ -8,6 +8,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import okhttp3.CacheControl
+import okhttp3.Call
 import okhttp3.CookieJar
 import okhttp3.Dispatcher
 import okhttp3.Headers
@@ -137,6 +138,19 @@ internal class WenkuPages(
         return policy.page(url, keyword) { load(url, body) }
     }
 
+    suspend fun <T> illustration(request: Request, read: (Response) -> T): T {
+        require(request.url.hasWenkuOrigin(origin))
+        return policy.exchange(searchResults = false, retryOnRateLimit = false) {
+            withResponse(request.newBuilder().headers(headers).header("Accept", "image/*").build()) { response ->
+                if (response.header("cf-mitigated").equals("challenge", ignoreCase = true)) {
+                    WenkuErrors.checkStatus(response.code, true)
+                }
+                if (response.code == 429) policy.limited(response.header("Retry-After"), response.header("Date"))
+                read(response)
+            }
+        }
+    }
+
     private suspend fun load(start: HttpUrl, form: RequestBody? = null): Document {
         var url = start
         var body = form
@@ -228,28 +242,29 @@ internal class WenkuPages(
 
     private suspend fun <T> withResponse(request: Request, read: (Response) -> T): T {
         executeRequest?.let { return it(request).use(read) }
-        return coroutineScope {
-            val call = client.newCall(request)
-            val finished = AtomicBoolean()
-            // The host await() cancels up to response delivery. Keep cancellation active while reading the body.
-            val cancelCall = launch(start = CoroutineStart.UNDISPATCHED) {
-                try {
-                    awaitCancellation()
-                } finally {
-                    if (!finished.get()) call.cancel()
-                }
-            }
-            try {
-                call.await().use(read)
-            } finally {
-                finished.set(true)
-                cancelCall.cancel()
-            }
-        }
+        return wenkuReadResponse(client.newCall(request), read)
     }
 
     companion object {
         private const val MAX_HTML_BYTES = 2L * 1024 * 1024
+    }
+}
+
+internal suspend fun <T> wenkuReadResponse(call: Call, read: (Response) -> T): T = coroutineScope {
+    val finished = AtomicBoolean()
+    // The host await() cancels up to response delivery. Keep cancellation active while reading the body.
+    val cancelCall = launch(start = CoroutineStart.UNDISPATCHED) {
+        try {
+            awaitCancellation()
+        } finally {
+            if (!finished.get()) call.cancel()
+        }
+    }
+    try {
+        call.await().use(read)
+    } finally {
+        finished.set(true)
+        cancelCall.cancel()
     }
 }
 

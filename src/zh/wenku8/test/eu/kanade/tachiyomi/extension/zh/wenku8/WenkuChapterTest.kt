@@ -160,7 +160,7 @@ class WenkuChapterTest {
                     .body(html.toResponseBody())
                     .build()
             }
-            val reader = WenkuReader(pages, origin, WenkuTextCache(directory))
+            val reader = WenkuReader(pages, origin, WenkuTextCache(directory)) { error("Missing chapters must never fetch images") }
             val error = assertThrows(WenkuAccessException::class.java) { runBlocking { reader.pageUrls(path) } }
             assertEquals(failure, error.failure)
             assertEquals(if (status == 429) 2 else 1, requests)

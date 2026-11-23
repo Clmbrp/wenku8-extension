@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.extension.zh.wenku8
 
+import android.util.Log
+import eu.kanade.tachiyomi.extension.BuildConfig
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -23,11 +25,19 @@ abstract class Wenku8 : HttpSource() {
         networkInterceptors().removeAll { it.javaClass.name == "okhttp3.logging.HttpLoggingInterceptor" }
     }.build()
 
-    private val pages by lazy { WenkuPages(client, headers, baseUrl.siteUrl()) }
+    private val diagnostics = if (BuildConfig.DEBUG) WenkuDiagnostics { Log.d(WenkuDiagnostics.TAG, it) } else null
+    private val pages by lazy { WenkuPages(client, headers, baseUrl.siteUrl(), diagnostics) }
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         if (page != 1) throw WenkuAccessException(AccessFailure.STRUCTURE, "总热度榜没有更多页面")
-        val books = WenkuParser.totalRanking(pages.get("/top.php"), baseUrl.siteUrl().host)
+        val html = pages.get("/top.php")
+        val books = try {
+            WenkuParser.totalRanking(html, baseUrl.siteUrl().host)
+        } catch (e: WenkuAccessException) {
+            diagnostics?.result("ranking", e.failure.name)
+            throw e
+        }
+        diagnostics?.result("ranking", "RANKING_HTML")
         return MangasPage(
             books.map { book ->
                 SManga.create().apply {

@@ -13,7 +13,9 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 
@@ -106,10 +108,40 @@ class WenkuAccessTest {
     }
 
     @Test
+    fun `session hint uses the protected path without making a login request`() {
+        val lookedUpPaths = mutableListOf<String>()
+        val jar = object : CookieJar {
+            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = Unit
+            override fun loadForRequest(url: HttpUrl): List<Cookie> {
+                lookedUpPaths += url.encodedPath
+                return if (url.encodedPath == "/top.php") {
+                    listOf(Cookie.Builder().name("jieqiUserInfo").value("synthetic").hostOnlyDomain(url.host).path("/top.php").secure().build())
+                } else {
+                    emptyList()
+                }
+            }
+        }
+        val visited = mutableListOf<HttpUrl>()
+        val pages = WenkuPages(OkHttpClient.Builder().cookieJar(jar).build(), headersOf(), origin) { url ->
+            visited += url
+            response(url, 302, location = "/login.php?jumpurl=%2Ftop.php")
+        }
+        val error = assertThrows(WenkuAccessException::class.java) { runBlocking { pages.get("/top.php") } }
+        assertEquals(AccessFailure.SESSION_EXPIRED, error.failure)
+        assertEquals(listOf("/top.php"), lookedUpPaths)
+        assertEquals(listOf(origin.resolve("/top.php")), visited)
+    }
+
+    @Test
     fun `http challenge rate limit and network failures remain distinct`() {
         for ((status, html, expected) in listOf(
             Triple(403, "<title>Forbidden</title>", AccessFailure.FORBIDDEN),
-            Triple(403, "<title>Attention Required!</title>", AccessFailure.CHALLENGE),
+            Triple(403, "<title>Attention Required!</title>", AccessFailure.FORBIDDEN),
+            Triple(
+                403,
+                """<title>Attention Required! | Cloudflare</title><div id="cf-error-details"><h1 data-translate="block_headline">Sorry, you have been blocked</h1></div>""",
+                AccessFailure.CLOUDFLARE_BLOCK,
+            ),
             Triple(200, "<title>Just a moment...</title>", AccessFailure.CHALLENGE),
             Triple(429, "<title>Just a moment...</title>", AccessFailure.RATE_LIMITED),
         )) {
@@ -120,6 +152,41 @@ class WenkuAccessTest {
         val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { throw IOException("offline") }
         val error = assertThrows(WenkuAccessException::class.java) { runBlocking { pages.get("/top.php") } }
         assertEquals(AccessFailure.NETWORK, error.failure)
+    }
+
+    @Test
+    fun `explicit challenge header rejects even successful ranking markup`() {
+        val logs = mutableListOf<String>()
+        val pages = WenkuPages(OkHttpClient(), headersOf(), origin, WenkuDiagnostics { logs += it }) { url ->
+            response(url, 200, ranking.toByteArray(charset("GBK"))).newBuilder().header("cf-mitigated", "challenge").build()
+        }
+        val error = assertThrows(WenkuAccessException::class.java) { runBlocking { pages.get("/top.php") } }
+        assertEquals(AccessFailure.CHALLENGE, error.failure)
+        assertTrue(logs.any { "status=200 challengeHeader=true" in it })
+        assertTrue("result stage=response kind=CHALLENGE" in logs)
+    }
+
+    @Test
+    fun `debug trace reports cookie presence and excludes values and unknown paths`() {
+        val logs = mutableListOf<String>()
+        val debug = WenkuDiagnostics { logs += it }
+        val url = "https://www.wenku8.net/top.php?secret-query=value#secret-fragment".toHttpUrl()
+        debug.session(url, false)
+        debug.sent(Request.Builder().url(url).header("Cookie", "PHPSESSID=secret-session").build())
+        debug.sent(Request.Builder().url(url).header("Cookie", "other=secret-other; jieqiUserInfo=secret-login").build())
+        debug.redirect("http://www.wenku8.net/login.php?jumpurl=secret-redirect".toHttpUrl())
+        debug.redirect("https://secret-host.example/secret-path".toHttpUrl())
+        assertEquals(
+            listOf(
+                "session url=https://www.wenku8.net/top.php loginCookieVisible=false",
+                "request url=https://www.wenku8.net/top.php loginCookieSent=false",
+                "request url=https://www.wenku8.net/top.php loginCookieSent=true",
+                "redirect target=http://www.wenku8.net/login.php",
+                "redirect target=https://<external>/<redacted>",
+            ),
+            logs,
+        )
+        assertFalse(logs.any { "secret-" in it })
     }
 
     @Test

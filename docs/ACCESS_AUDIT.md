@@ -8,6 +8,20 @@
 
 ## 本次环境与访问结果
 
+- **[2026-11-23 用户 Chrome 实测]** 在同一 Android 手机的 Chrome，`https://www.wenku8.net/login.php` 登录页、`POST https://www.wenku8.net/login.php?do=submit` 表单和 `https://www.wenku8.net/checkcode.php` 验证码图片均使用 HTTPS，用户报告该浏览器可登录。同一手机 Mihon WebView 显示 HTTP 登录地址并报告校验码错误；这不证明两者使用相同会话或请求链。
+- **[2026-11-23 设备及源码]** 已连接设备的包管理器报告插件版本 `1.6.3`、Mihon `0.21.3`。对照 [Mihon v0.21.3 来源页面](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt)、[WebView 导航](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/presentation/webview/WebViewScreenContent.kt)与 [CookieJar](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/core/common/src/main/kotlin/eu/kanade/tachiyomi/network/AndroidCookieJar.kt)：来源浏览页初始地址取 `getHomeUrl()`；宿主后续导航允许同主机 HTTP；默认 CookieJar 使用 Android `CookieManager`。Wenku8 1.6.3 代码提供 HTTPS 登录初始地址，插件的 OkHttp 跳转检查不控制宿主 WebView 后续导航，也不能保证表单或验证码请求共用有效会话。设备上未发现可用 WebView 远程调试通道，未获取本次导航链或请求 Cookie。
+- **[源码对比]** Wenku8 没有覆盖 `headersBuilder()`，使用宿主默认 User-Agent；BiliNovel 显式添加了自己网站使用的 User-Agent、Referer 和语言等请求头。两站行为不同，不能由 BiliNovel 可登录推断 Wenku8 必须采用这些值；不能据此断定 UA 或 Cookie 为降级根因。站点重定向、页面导航、宿主导航处理及设备会话均为待证实可能性。
+- **[结论与安全边界]** Chrome HTTPS 流程已证实，但无法仅凭现有证据定位 Mihon WebView 的 HTTP 来源或验证码失败原因；不更改凭据、伪造 Cookie、禁用 TLS 或更换 UA 猜测修复。若 WebView 后续导航或表单最终使用 HTTP，扩展仅覆盖初始入口，无法保证安全提交；停止输入/提交凭据，使用已验证的 Chrome HTTPS 页面，或等待宿主/站点支持可验证的 HTTPS 流程。Chrome 登录不保证其 Cookie 可用于 Mihon。
+
+- **[2026-11-23 用户设备报告]** Android Chrome 的 HTTPS 登录可用；Mihon WebView 最终出现 `http://www.wenku8.net/login.php`（含跳转参数），验证码图片可见但提交提示校验码错误；热门页另报“页面跳转到未验证的站点”。当前没有该设备的完整导航状态/重定向链、登录表单 action 和验证码请求的会话证据，不能认定 HTTP 是验证码失败的唯一原因，也不能确认热门页实际跳转目标。
+- **[宿主源码与插件检查]** Mihon 所检查的源码中，来源浏览页通过 `getHomeUrl()` 设置 WebView 初始地址；之前插件继承的默认值是 HTTPS `baseUrl`。所见 HTTP 地址发生在该入口之后，但无法仅凭最终地址判断它来自 HTTP Location、页面链接、脚本还是其他导航。新版本覆盖 `getHomeUrl()` 为 `https://www.wenku8.net/login.php`，避免必须从首页进入登录；书籍详情等其他 WebView 入口可能使用各自页面 URL。插件不能凭此控制宿主后续导航、站点表单 action、验证码图片请求和 POST。
+- **[2026-11-23 本地测试]** 模拟站点返回同主机、默认端口的 HTTP `/login.php` 跳转时，旧代码将其报告为未验证站点；新代码不请求该 HTTP URL，而按登录 Cookie 的有无提示登录或可能过期。外域、其他 HTTP 路径与非标准端口仍拒绝。此测试说明一种可以复现的异常路径，并未证明用户设备的重定向目标就是该路径。
+- **[待设备验证]** 核实 HTTPS 登录页最终是否仍留在 HTTPS、表单 POST 目标及验证码图片是否使用相同会话；不得记录密码、验证码、Cookie 或 Token。如页面或提交目标降为 HTTP，应停止提交，不能保证扩展覆盖 WebView 的后续导航。站点的 HTTP/HTTPS Cookie 属性、验证码更新时序或 WebView 差异也可能影响结果，需要安全的脱敏证据和真机复测，不能声称已修复登录。
+
+- **[阶段 2 实测]** 一次通过既有代理对 `GET https://www.wenku8.net/top.php` 的请求，代理 CONNECT 200、TLS 验证结果 0，最终 HTTP 403、无重定向；沙箱内请求因禁止套接字失败。未尝试绕过或反复请求。此结果不是插件真机请求，不能证明插件能获取榜单。
+- **[阶段 2 设备]** `adb devices -l` 在获准的宿主环境下未列出设备，因此插件安装、WebView 登录、Cookie 共享和 OkHttp 访问均未完成真机验证。阶段 1 用户报告的已登录 Chrome 页面与 Network 结果仍是浏览器辅助证据，并非本次 APK 验证。
+- **[宿主源码]** 在 Mihon 主仓库提交 `f8e30a86086020aaee1e89a9d015373b1a4ff026` 中，[NetworkHelper](https://github.com/mihonapp/mihon/blob/f8e30a86086020aaee1e89a9d015373b1a4ff026/core/common/src/main/kotlin/eu/kanade/tachiyomi/network/NetworkHelper.kt) 使用 [AndroidCookieJar](https://github.com/mihonapp/mihon/blob/f8e30a86086020aaee1e89a9d015373b1a4ff026/core/common/src/main/kotlin/eu/kanade/tachiyomi/network/AndroidCookieJar.kt)，后者连接 Android `CookieManager`；宿主另有 [WebView 界面](https://github.com/mihonapp/mihon/blob/f8e30a86086020aaee1e89a9d015373b1a4ff026/app/src/main/java/eu/kanade/tachiyomi/ui/webview/WebViewScreen.kt)。此源码说明该版本的设计，不能代替目标设备和其他 Mihon 分支上的验证。宿主默认客户端包含可能自动启动后台 WebView 的 Cloudflare 拦截器，插件仅移除这个已知类；其他宿主版本是否存在不同拦截器仍需验证。
+
 - **[实测]** 沙箱内 DNS 查询和 curl 无法创建网络套接字（`Operation not permitted`），此结果只说明沙箱限制。获准使用现有网络后，本机解析器对 `www.wenku8.net` 返回 Cloudflare CNAME 和 A 记录；`www.wenku8.com`、`www.wenku8.cn` 也各有 A 记录。DNS 会变化，本机 DNS 查询并不证明代理实际使用相同解析结果。
 - **[实测]** 使用现有代理访问 `GET https://www.wenku8.net/`，代理 CONNECT 返回 200，TLS 校验结果为 0，最终 HTTP/2 403、无重定向，响应 `text/html; charset=UTF-8`，页面为 Cloudflare 的 `Attention Required!` / `Sorry, you have been blocked`。这是一张拦截页，并非网站内容或登录页；原因和触发条件未确定。它不是 429，也不能证明目标正文编码为 UTF-8。
 - **[实测]** 同代理访问 `/robots.txt` 得到 403，未能读取其内容；因此无法从该文件判断抓取规则或授权。外部网页获取工具访问候选首页也得到 403，但不等同于用户 Chrome 或 Android WebView 的行为。

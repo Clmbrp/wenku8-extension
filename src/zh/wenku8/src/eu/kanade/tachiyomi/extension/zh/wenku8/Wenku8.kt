@@ -13,7 +13,31 @@ import keiyoushi.annotation.Source
 abstract class Wenku8 : HttpSource() {
     override val supportsLatest = false
 
-    override suspend fun getPopularManga(page: Int): MangasPage = notImplemented()
+    override fun getHomeUrl(): String = "$baseUrl/login.php"
+
+    // The host's Cloudflare interceptor may start an automated background WebView. This source
+    // only allows user-initiated interaction in the host WebView. Preserve the host cookie jar.
+    override val client = super.client.newBuilder().apply {
+        interceptors().removeAll { it.javaClass.name == "eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor" }
+        interceptors().removeAll { it.javaClass.name == "okhttp3.logging.HttpLoggingInterceptor" }
+        networkInterceptors().removeAll { it.javaClass.name == "okhttp3.logging.HttpLoggingInterceptor" }
+    }.build()
+
+    private val pages by lazy { WenkuPages(client, headers, baseUrl.siteUrl()) }
+
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        if (page != 1) throw WenkuAccessException(AccessFailure.STRUCTURE, "总热度榜没有更多页面")
+        val books = WenkuParser.totalRanking(pages.get("/top.php"), baseUrl.siteUrl().host)
+        return MangasPage(
+            books.map { book ->
+                SManga.create().apply {
+                    title = book.title
+                    url = book.path
+                }
+            },
+            false,
+        )
+    }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage = notImplemented()
 

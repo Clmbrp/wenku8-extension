@@ -38,14 +38,14 @@ internal fun wenkuPaginate(lineTops: IntArray, firstHeight: Int, pageHeight: Int
  * StaticLayout and Canvas drawing adapted from the Apache-2.0 BiliNovel TextInterceptor.
  * Keep the original paragraph layout and clip at line boundaries instead of laying out slices again.
  */
-internal class WenkuTextRenderer(internal val style: WenkuReadingStyle = WenkuReadingStyle(), legacy: Boolean = false) {
+internal class WenkuTextRenderer(internal val style: WenkuReadingStyle = WenkuReadingStyle(), legacy: Boolean = false) : WenkuPageGraphics {
     private val edgeMargin = if (legacy) 52 else 20
     internal val titleMargin = 52
 
-    inner class Chapter(private val heading: StaticLayout?, private val body: StaticLayout, private val pages: List<WenkuLinePage>) {
-        val pageCount: Int get() = pages.size
+    inner class Chapter(private val heading: StaticLayout?, private val body: StaticLayout, private val pages: List<WenkuLinePage>) : WenkuTextPages {
+        override val pageCount: Int get() = pages.size
 
-        fun png(index: Int): ByteArray {
+        override fun png(index: Int): ByteArray {
             val page = pages.getOrNull(index) ?: throw IOException("阅读页不存在，请重新打开章节")
             val pageHeading = heading.takeIf { index == 0 }
             val bodyTop = topMargin(pageHeading) + headingHeight(pageHeading)
@@ -69,7 +69,7 @@ internal class WenkuTextRenderer(internal val style: WenkuReadingStyle = WenkuRe
         }
     }
 
-    fun prepare(text: WenkuChapterText): Chapter {
+    override fun prepare(text: WenkuChapterText): Chapter {
         val heading = heading(text.title)
         val body = layout(wenkuSpacedParagraphs(text.body, style.paragraphGap), style.bodySize, heading = false)
         val lineTops = IntArray(body.lineCount + 1) { body.getLineTop(it) }
@@ -78,6 +78,8 @@ internal class WenkuTextRenderer(internal val style: WenkuReadingStyle = WenkuRe
         val pages = wenkuPaginate(lineTops, firstHeight, available)
         return Chapter(heading, body, pages)
     }
+
+    override fun illustration(data: ByteArray, title: String): ByteArray = wenkuIllustrationPng(data, title, this)
 
     fun heading(title: String): StaticLayout? = title.takeIf(String::isNotBlank)?.let { layout(it, style.headingSize, heading = true) }
 

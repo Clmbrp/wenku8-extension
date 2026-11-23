@@ -34,7 +34,7 @@ abstract class Wenku8 :
     override fun getHomeUrl(): String = baseUrl + wenkuWebViewPath(preferences.getString(WEBVIEW_ENTRY, null))
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        screen.addPreference(
+        wenkuPreferenceGroup(screen, "网站访问")(
             ListPreference(screen.context).apply {
                 key = WEBVIEW_ENTRY
                 title = "来源 WebView 打开页面"
@@ -135,7 +135,7 @@ abstract class Wenku8 :
         return SMangaUpdate(updated, chapterList)
     }
 
-    override suspend fun getPageList(chapter: SChapter): List<Page> = reader.pageUrls(chapter.url).mapIndexed { index, url -> Page(index, url) }
+    override suspend fun getPageList(chapter: SChapter): List<Page> = wenkuMihonPages(reader.pageUrls(chapter.url))
 
     override suspend fun getImageUrl(page: Page): String {
         val url = page.url.toHttpUrlOrNull()
@@ -145,3 +145,5 @@ abstract class Wenku8 :
         return page.url
     }
 }
+
+internal fun wenkuMihonPages(urls: List<String>): List<Page> = urls.mapIndexed { index, url -> Page(index, url, url) }

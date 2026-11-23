@@ -56,6 +56,53 @@ class WenkuReadingStyleTest {
     }
 
     @Test
+    fun `old preset preferences keep their values and existing page stamp`() {
+        val saved = pref("body_size" to "56", "heading_size" to "58", "line_spacing" to "155", "paragraph_gap" to "18", "side_margin" to "80", "paper" to "IVORY", "ink" to "WARM")
+        val style = WenkuReadingStyle.fromPreferences(saved, dark = false)
+        val originalStamp = "56-58-155-18-80-IVORY-WARM-0"
+        assertEquals(originalStamp, style.stamp())
+        assertEquals(style, WenkuReadingStyle.fromStamp(originalStamp))
+        assertEquals("56", saved[WENKU_STYLE_PREFIX + "body_size"])
+    }
+
+    @Test
+    fun `custom integers validate boundaries and persist in the existing keys`() {
+        val range = WenkuReadingStyle.BODY_RANGE
+        assertEquals(47, wenkuInteger(" 47 ", range))
+        assertEquals(range.first, wenkuInteger(range.first.toString(), range))
+        assertEquals(range.last, wenkuInteger(range.last.toString(), range))
+        for (invalid in listOf("29", "73", "12.5", "-45", "４９", "4 9", "9999999999", "")) assertNull(wenkuInteger(invalid, range))
+        val settings = pref("body_size" to "47", "heading_size" to "63", "line_spacing" to "140", "paragraph_gap" to "27", "side_margin" to "71")
+        val style = WenkuReadingStyle.fromPreferences(settings, dark = false)
+        assertEquals(listOf(47, 63, 140, 27, 71), listOf(style.bodySize, style.headingSize, style.lineSpacingPercent, style.paragraphGap, style.horizontalMargin))
+        assertEquals(style, WenkuPageRef.parse(WenkuPageRef(key, 0, style).url().toHttpUrl())?.style)
+    }
+
+    @Test
+    fun `custom RGB is validated separately for light and dark and keeps text readable`() {
+        assertEquals("#FAFAF8", wenkuHexColor(" #fafaf8 "))
+        for (invalid in listOf("FAFAF8", "#FAF", "#FFFAFAF8", "#ZZ0000", "red", "")) assertNull(wenkuHexColor(invalid))
+        val settings = pref("paper" to "IVORY", "ink" to "WARM").toMutableMap()
+        settings[wenkuColorPreferenceKey("paper", dark = false)] = "#FAFAF8"
+        settings[wenkuColorPreferenceKey("ink", dark = false)] = "#333333"
+        settings[wenkuColorPreferenceKey("paper", dark = true)] = "#101122"
+        val light = WenkuReadingStyle.fromPreferences(settings, dark = false)
+        val dark = WenkuReadingStyle.fromPreferences(settings, dark = true)
+        assertEquals("FAFAF8", light.backgroundColor.hexRgb())
+        assertEquals("333333", light.textColor.hexRgb())
+        assertEquals("101122", dark.backgroundColor.hexRgb())
+        assertEquals("F0D8BE", dark.textColor.hexRgb())
+        for (style in listOf(light, dark)) {
+            val ref = WenkuPageRef(key, 0, style)
+            assertEquals(ref, WenkuPageRef.parse(ref.url().toHttpUrl()))
+        }
+        assertNull(WenkuReadingStyle.fromStamp(dark.stamp().replace("-101122-X", "-NOPE-X")))
+        val unreadable = light.copy(customInk = light.backgroundColor)
+        assertNotEquals(unreadable.backgroundColor, unreadable.textColor)
+        assertTrue(wenkuColorContrast(unreadable.backgroundColor, unreadable.textColor) >= WENKU_MIN_CONTRAST)
+    }
+
+    @Test
     fun `each style dimension changes the page cache key and can be recovered after restart`() {
         val variants = listOf(
             standard,

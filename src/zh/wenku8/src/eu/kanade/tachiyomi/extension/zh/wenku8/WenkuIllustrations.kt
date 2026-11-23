@@ -25,6 +25,7 @@ internal class WenkuIllustrations(
     client: OkHttpClient,
     private val pages: WenkuPages,
     private val origin: HttpUrl,
+    private val externalPolicy: WenkuRequestPolicy = WenkuRequestPolicy(intervalMillis = 750),
     private val executeExternal: (suspend (Request) -> Response)? = null,
 ) {
     private val anonymous = client.newBuilder()
@@ -51,7 +52,7 @@ internal class WenkuIllustrations(
             val result = if (url.hasWenkuOrigin(origin)) {
                 pages.illustration(request, ::read)
             } else {
-                executeExternal?.invoke(request)?.use(::read) ?: wenkuReadResponse(anonymous.newCall(request), ::read)
+                readExternal(request)
             }
             when (result) {
                 is ImageResponse.Bytes -> return result.data
@@ -61,13 +62,28 @@ internal class WenkuIllustrations(
         throw IOException("插图跳转次数过多")
     }
 
+    private suspend fun readExternal(request: Request): ImageResponse {
+        fun classify(response: Response): ImageResponse {
+            if (response.code == 429) externalPolicy.limited(response.header("Retry-After"), response.header("Date"))
+            return read(response)
+        }
+        try {
+            return externalPolicy.exchange(searchResults = false, retryOnRateLimit = false) {
+                executeExternal?.invoke(request)?.use(::classify) ?: wenkuReadResponse(anonymous.newCall(request), ::classify)
+            }
+        } catch (error: WenkuAccessException) {
+            if (error.failure != AccessFailure.RATE_LIMITED) throw error
+            throw IOException("插图服务器限制访问（HTTP 429），请稍后重试", error)
+        }
+    }
+
     private fun read(response: Response): ImageResponse {
         if (response.code in listOf(301, 302, 303, 307, 308)) {
             val target = response.header("Location")?.let(response.request.url::resolve)
                 ?: throw IOException("插图跳转地址无效")
             return ImageResponse.Redirect(target)
         }
-        if (!response.isSuccessful) throw IOException("插图加载失败（HTTP ${response.code}）")
+        if (response.code != 200) throw IOException("插图加载失败（HTTP ${response.code}，未收到完整文件）")
         val type = response.body.contentType()
         if (type != null && type.type != "image" && type.toString().substringBefore(';') != "application/octet-stream") {
             throw IOException("插图服务器返回了非图片内容")

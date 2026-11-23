@@ -152,7 +152,7 @@ class WenkuIllustrationTest {
 
     @Test
     fun `illustration failures reject rate limits inline error HTML and unsafe redirects`() {
-        for (case in listOf("429", "html", "downgrade", "local")) {
+        for (case in listOf("429", "206", "html", "downgrade", "local")) {
             var count = 0
             val network = OkHttpClient()
             val pages = WenkuPages(network, headersOf(), origin) { error("Unexpected main-site request") }
@@ -160,6 +160,7 @@ class WenkuIllustrationTest {
                 count++
                 when (case) {
                     "429" -> response(request, status = 429)
+                    "206" -> response(request, status = 206, content = byteArrayOf(1, 2))
                     "html" -> response(request, mime = "text/html", content = "<html>error</html>".encodeToByteArray())
                     "downgrade" -> response(request, status = 302, location = "http://cdn.example.org/image.jpg")
                     else -> response(request, status = 302, location = "https://127.0.0.1/image.jpg")
@@ -169,6 +170,32 @@ class WenkuIllustrationTest {
             assertEquals(1, count)
             assertTrue(error.message.orEmpty().contains("插图"))
         }
+    }
+
+    @Test
+    fun `external illustration retry obeys CDN cooldown without delaying main site requests`() = runBlocking {
+        val clock = AtomicLong()
+        val requests = mutableListOf<Pair<String, Long>>()
+        val network = OkHttpClient()
+        val pages = WenkuPages(network, headersOf(), origin) { request ->
+            requests += "site" to clock.get()
+            response(request, content = "<html><title>样本</title></html>".encodeToByteArray(), mime = "text/html")
+        }
+        val policy = WenkuRequestPolicy(intervalMillis = 750, monotonicMillis = clock::get, pause = { clock.addAndGet(it) })
+        val bytes = byteArrayOf(1, 2, 3)
+        val illustrations = WenkuIllustrations(network, pages, origin, externalPolicy = policy) { request ->
+            requests += "cdn" to clock.get()
+            if (clock.get() == 0L) {
+                response(request, status = 429).newBuilder().header("Retry-After", "8").build()
+            } else {
+                response(request, content = bytes)
+            }
+        }
+        assertTrue(runCatching { illustrations.fetch("https://cdn.example.org/image.jpg") }.exceptionOrNull() is IOException)
+        pages.get(chapterPath)
+        assertArrayEquals(bytes, illustrations.fetch("https://cdn.example.org/image.jpg"))
+        assertArrayEquals(bytes, illustrations.fetch("https://cdn.example.org/another.jpg"))
+        assertEquals(listOf("cdn" to 0L, "site" to 0L, "cdn" to 8_000L, "cdn" to 8_750L), requests)
     }
 
     @Test

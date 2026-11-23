@@ -22,15 +22,26 @@ import java.io.File
 import java.io.IOException
 import kotlin.coroutines.cancellation.CancellationException
 
+internal interface WenkuTextPages {
+    val pageCount: Int
+    fun png(index: Int): ByteArray
+}
+
+internal interface WenkuPageGraphics {
+    fun prepare(text: WenkuChapterText): WenkuTextPages
+    fun illustration(data: ByteArray, title: String): ByteArray
+}
+
 internal class WenkuReader(
     private val pages: WenkuPages,
     private val origin: HttpUrl,
     private val cache: WenkuTextCache,
     private val readStyle: () -> WenkuReadingStyle = { WenkuReadingStyle() },
+    private val graphics: (WenkuReadingStyle?) -> WenkuPageGraphics = { style -> WenkuTextRenderer(style ?: WenkuReadingStyle(), legacy = style == null) },
     private val fetchIllustration: suspend (String) -> ByteArray,
 ) {
     private sealed interface RenderPage {
-        data class Text(val chapter: WenkuTextRenderer.Chapter, val index: Int) : RenderPage
+        data class Text(val chapter: WenkuTextPages, val index: Int) : RenderPage
         data class Illustration(val url: String, val title: String) : RenderPage
     }
 
@@ -75,6 +86,7 @@ internal class WenkuReader(
         return Response.Builder()
             .request(request)
             .protocol(Protocol.HTTP_1_1)
+            // Mihon overwrites a partial download for 200. Every response here is a complete PNG.
             .code(200)
             .message("OK")
             .body(data.toResponseBody(PNG))
@@ -92,7 +104,7 @@ internal class WenkuReader(
                 illustrationSlots.withPermit {
                     synchronized(renderLock) { images[page] }?.let { return@withPermit it }
                     val data = fetchIllustration(entry.url)
-                    renderImage(page, call) { wenkuIllustrationPng(data, entry.title, renderer(page.style)) }
+                    renderImage(page, call) { graphics(page.style).illustration(data, entry.title) }
                 }
             }
         }
@@ -102,6 +114,7 @@ internal class WenkuReader(
         images[page]?.let { return@synchronized it }
         if (call.isCanceled()) throw IOException("阅读页加载已取消")
         val png = render()
+        if (call.isCanceled()) throw IOException("阅读页加载已取消")
         if (png.size <= MAX_IMAGE_BYTES) {
             images[page] = png
             imageBytes += png.size
@@ -117,7 +130,7 @@ internal class WenkuReader(
     private fun prepare(content: WenkuCachedChapter, style: WenkuReadingStyle?): List<RenderPage> = synchronized(renderLock) {
         val renderKey = WenkuRenderKey(content.key, style)
         layouts[renderKey]?.let { return@synchronized it }
-        val renderer = renderer(style)
+        val renderer = graphics(style)
         val chapter = try {
             content.content.readerPages<RenderPage>(
                 textPages = {
@@ -135,8 +148,6 @@ internal class WenkuReader(
         if (layouts.size > MAX_LAYOUTS) layouts.remove(layouts.keys.first())
         chapter
     }
-
-    private fun renderer(style: WenkuReadingStyle?) = WenkuTextRenderer(style ?: WenkuReadingStyle(), legacy = style == null)
 
     private suspend fun fetch(path: String, legacyText: Boolean = false): WenkuCachedChapter {
         val document = pages.get(path)

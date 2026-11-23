@@ -16,20 +16,28 @@ internal val WENKU_CHAPTER_PATH = Regex("/novel/\\d+/\\d+/\\d+\\.htm")
 
 internal data class WenkuTextKey(val chapterPath: String, val revision: String, val version: Int = 1)
 
-internal data class WenkuPageRef(val key: WenkuTextKey, val index: Int) {
-    fun url(): String = "${ORIGIN}v${key.version}${key.chapterPath}/${key.revision}/$index.png"
+internal data class WenkuRenderKey(val chapter: WenkuTextKey, val style: WenkuReadingStyle?)
+
+internal data class WenkuPageRef(val key: WenkuTextKey, val index: Int, val style: WenkuReadingStyle? = null) {
+    val renderKey get() = WenkuRenderKey(key, style)
+
+    fun url(): String {
+        val version = style?.let { "v3/${it.stamp()}/${key.version}" } ?: "v${key.version}"
+        return "$ORIGIN$version${key.chapterPath}/${key.revision}/$index.png"
+    }
 
     companion object {
         const val HOST = "wenku8-reader.invalid"
         private const val ORIGIN = "https://$HOST/"
         private val ROOT = ORIGIN.toHttpUrl()
-        private val PATH = Regex("/v([12])(/novel/\\d+/\\d+/\\d+\\.htm)/([a-f0-9]{64})/(\\d+)\\.png")
+        private val PATH = Regex("/(?:v|v3/([A-Z0-9-]{1,64})/)([12])(/novel/\\d+/\\d+/\\d+\\.htm)/([a-f0-9]{64})/(\\d+)\\.png")
 
         fun parse(url: HttpUrl): WenkuPageRef? {
             if (!url.hasWenkuOrigin(ROOT) || url.query != null || url.fragment != null) return null
             val match = PATH.matchEntire(url.encodedPath) ?: return null
-            val (version, chapter, revision, index) = match.destructured
-            return WenkuPageRef(WenkuTextKey(chapter, revision, version.toInt()), index.toIntOrNull() ?: return null)
+            val (stamp, version, chapter, revision, index) = match.destructured
+            val style = if (stamp.isEmpty()) null else WenkuReadingStyle.fromStamp(stamp) ?: return null
+            return WenkuPageRef(WenkuTextKey(chapter, revision, version.toInt()), index.toIntOrNull() ?: return null, style)
         }
     }
 }
@@ -43,10 +51,10 @@ internal class WenkuTextCache(
     private val legacyDirectory: File? = null,
 ) {
     @Synchronized
-    fun fresh(chapterPath: String): WenkuCachedChapter? {
+    fun fresh(chapterPath: String, allowExpired: Boolean = false): WenkuCachedChapter? {
         val prefix = filePrefix(chapterPath)
         return entries().asSequence().filter { it.name.startsWith(prefix) }
-            .filter { now() - it.lastModified() in 0..FRESH_MILLIS }
+            .filter { allowExpired || now() - it.lastModified() in 0..FRESH_MILLIS }
             .sortedByDescending(File::lastModified)
             .firstNotNullOfOrNull { file ->
                 val version = if (file.extension == "json") 2 else 1

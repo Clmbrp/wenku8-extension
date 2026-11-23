@@ -105,7 +105,8 @@
 
 ## 阶段 4.2 插图与图文混排
 
-- **[真实样本与有限联网]** 已保存的《化物语》卷首插图章给出 6 个 HTTPS JPEG 地址，主机为 `pic.777743.xyz`。仅抽查其中一张，电脑端收到 HTTP 200、JPEG、812 × 600 像素。此结果只覆盖该地址及当前出口。真实混排 HTML 与 Android 图片加载效果待真机验收。
+- **[真实样本与有限联网]** 已保存的《化物语》卷首插图章给出 6 个 HTTPS JPEG 地址，主机为 `pic.777743.xyz`。仅抽查其中一张，电脑端收到 HTTP 200、JPEG、812 × 600 像素。此结果只覆盖该地址及当前出口。
+- **[真机]** 用户在 1.6.11 确认卷首插图、纯插图章和混排显示正常，图文顺序与站点一致。截图也显示正文图片页边界有白色留边，4.3 缩小普通文字页的边缘留白。
 - **[源码与模拟验证]** 插图使用正文节点提供的地址，支持相对、协议相对和转义路径。生产请求验证每次 HTTPS 跳转。主站地址共享阶段 3 的节流与冷却。外部图床独立访问，省略主站请求头及 Cookie。插图 429 或非图片响应只使对应阅读页失败。图片不会随章节 HTML 一起下载。
 - **[源码与许可]** 参考仓库 Apache-2.0 下的 BiliNovel 当前 App 模式。App 分页先提交文字，再为插图建立独立图片页。Wenku8 在已验证的文字渲染器上加独立图片页，复用自己的文件与页面缓存。 [BiliNovel 章节结构](../src/zh/bilinovel/src/eu/kanade/tachiyomi/extension/zh/bilinovel/ChapterContent.kt) · [BiliNovel App 分页](../src/zh/bilinovel/src/eu/kanade/tachiyomi/extension/zh/bilinovel/TextInterceptor.kt) · [仓库许可](../LICENSE)
 

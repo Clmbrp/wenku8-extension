@@ -109,6 +109,8 @@ private fun publicImageAddress(address: InetAddress): Boolean {
 
 internal data class WenkuImageSize(val width: Int, val height: Int)
 
+private const val ILLUSTRATION_SIDE_MARGIN = 62
+
 internal fun wenkuFitImage(width: Int, height: Int, maxWidth: Int, maxHeight: Int): WenkuImageSize {
     if (width <= 0 || height <= 0 || maxWidth <= 0 || maxHeight <= 0) throw IOException("插图尺寸无效")
     val scale = minOf(1.0, maxWidth.toDouble() / width, maxHeight.toDouble() / height)
@@ -133,9 +135,9 @@ internal fun wenkuIllustrationPng(data: ByteArray, title: String, renderer: Wenk
     val style = renderer.style
     val heading = renderer.heading(title)
     // Untitled figures keep just a narrow white edge. Title spacing matches the text reader.
-    val margin = if (heading == null) 12 else style.verticalMargin
+    val margin = if (heading == null) 12 else renderer.titleMargin
     val top = margin + renderer.headingHeight(heading)
-    val size = wenkuFitImage(bounds.outWidth, bounds.outHeight, style.width - style.horizontalMargin * 2, style.maxHeight - top - margin)
+    val size = wenkuFitImage(bounds.outWidth, bounds.outHeight, style.width - ILLUSTRATION_SIDE_MARGIN * 2, style.maxHeight - top - margin)
     val options = BitmapFactory.Options().apply {
         inSampleSize = wenkuImageSampleSize(bounds.outWidth, bounds.outHeight)
         inPreferredConfig = Bitmap.Config.ARGB_8888

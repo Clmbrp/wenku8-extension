@@ -86,7 +86,7 @@ class WenkuIllustrationTest {
         val reader = makeReader()
         val urls = reader.pageUrls(chapterPath)
         assertEquals(2, urls.size)
-        assertTrue(urls.all { "/v2/" in it })
+        assertTrue(urls.all { "/v3/" in it && WenkuPageRef.parse(it.toHttpUrl())?.key?.version == 2 })
         assertEquals(urls, makeReader().pageUrls(chapterPath))
         assertEquals(1, htmlCalls)
         assertEquals(0, imageCalls)

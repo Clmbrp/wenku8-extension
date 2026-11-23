@@ -45,6 +45,7 @@ abstract class Wenku8 :
                     "关闭后切回账号登录，从 HTTPS 登录页登录，再返回刷新热门榜。若出现 HTTP 登录页，请关闭页面，勿输入账号密码。"
             },
         )
+        wenkuReadingPreferences(screen, preferences) { reader.refreshPageLists(applicationContext.cacheDir) }
     }
 
     private val diagnostics = if (BuildConfig.DEBUG) WenkuDiagnostics { Log.d(WenkuDiagnostics.TAG, it) } else null
@@ -67,7 +68,13 @@ abstract class Wenku8 :
         val origin = baseUrl.siteUrl()
         val cacheDir = applicationContext.cacheDir
         val cache = WenkuTextCache(File(cacheDir, "wenku8-reader-v2-$id"), legacyDirectory = File(cacheDir, "wenku8-text-v1-$id"))
-        WenkuReader(pages, origin, cache, WenkuIllustrations(client, pages, origin)::fetch)
+        WenkuReader(
+            pages,
+            origin,
+            cache,
+            readStyle = { wenkuReadingStyle(preferences, applicationContext) },
+            fetchIllustration = WenkuIllustrations(client, pages, origin)::fetch,
+        )
     }
 
     override suspend fun getPopularManga(page: Int): MangasPage = browse.popular(page).toMangasPage()

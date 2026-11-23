@@ -18,6 +18,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import java.io.File
 import java.io.IOException
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -25,6 +26,7 @@ internal class WenkuReader(
     private val pages: WenkuPages,
     private val origin: HttpUrl,
     private val cache: WenkuTextCache,
+    private val readStyle: () -> WenkuReadingStyle = { WenkuReadingStyle() },
     private val fetchIllustration: suspend (String) -> ByteArray,
 ) {
     private sealed interface RenderPage {
@@ -32,10 +34,10 @@ internal class WenkuReader(
         data class Illustration(val url: String, val title: String) : RenderPage
     }
 
-    private val renderer = WenkuTextRenderer()
     private val renderLock = Any()
     private val illustrationSlots = Semaphore(2)
-    private val layouts = LinkedHashMap<WenkuTextKey, List<RenderPage>>(4, 0.75f, true)
+    private val restyles = mutableSetOf<String>()
+    private val layouts = LinkedHashMap<WenkuRenderKey, List<RenderPage>>(4, 0.75f, true)
     private val images = LinkedHashMap<WenkuPageRef, ByteArray>(16, 0.75f, true)
     private var imageBytes = 0
 
@@ -43,9 +45,15 @@ internal class WenkuReader(
         val url = origin.resolve(chapterUrl)?.takeIf { it.hasWenkuOrigin(origin) && WENKU_CHAPTER_PATH.matches(it.encodedPath) }
             ?: throw WenkuAccessException(AccessFailure.STRUCTURE, "章节地址不符合预期")
         val path = url.encodedPath
-        val content = cache.fresh(path) ?: fetch(path)
-        val chapter = prepare(content)
-        List(chapter.size) { WenkuPageRef(content.key, it).url() }
+        val restyle = synchronized(restyles) { restyles.remove(path) }
+        val content = cache.fresh(path, allowExpired = restyle) ?: fetch(path)
+        val style = readStyle()
+        val chapter = prepare(content, style)
+        List(chapter.size) { WenkuPageRef(content.key, it, style).url() }
+    }
+
+    fun refreshPageLists(appCache: File): WenkuPageListRefreshResult = wenkuRefreshPageLists(appCache, readStyle()) { path ->
+        synchronized(restyles) { restyles.add(path) }
     }
 
     fun intercept(chain: Interceptor.Chain): Response {
@@ -75,8 +83,8 @@ internal class WenkuReader(
 
     private fun image(page: WenkuPageRef, call: Call): ByteArray {
         synchronized(renderLock) { images[page]?.let { return it } }
-        val plan = synchronized(renderLock) { layouts[page.key] }
-            ?: prepare(cache.read(page.key) ?: recover(page.key, call))
+        val plan = synchronized(renderLock) { layouts[page.renderKey] }
+            ?: prepare(cache.read(page.key) ?: recover(page.key, call), page.style)
         val entry = plan.getOrNull(page.index) ?: throw IOException("阅读页不存在，请重新打开章节")
         return when (entry) {
             is RenderPage.Text -> renderImage(page, call) { entry.chapter.png(entry.index) }
@@ -84,7 +92,7 @@ internal class WenkuReader(
                 illustrationSlots.withPermit {
                     synchronized(renderLock) { images[page] }?.let { return@withPermit it }
                     val data = fetchIllustration(entry.url)
-                    renderImage(page, call) { wenkuIllustrationPng(data, entry.title, renderer) }
+                    renderImage(page, call) { wenkuIllustrationPng(data, entry.title, renderer(page.style)) }
                 }
             }
         }
@@ -106,8 +114,10 @@ internal class WenkuReader(
         png
     }
 
-    private fun prepare(content: WenkuCachedChapter): List<RenderPage> = synchronized(renderLock) {
-        layouts[content.key]?.let { return@synchronized it }
+    private fun prepare(content: WenkuCachedChapter, style: WenkuReadingStyle?): List<RenderPage> = synchronized(renderLock) {
+        val renderKey = WenkuRenderKey(content.key, style)
+        layouts[renderKey]?.let { return@synchronized it }
+        val renderer = renderer(style)
         val chapter = try {
             content.content.readerPages<RenderPage>(
                 textPages = {
@@ -121,10 +131,12 @@ internal class WenkuReader(
         } catch (error: RuntimeException) {
             throw IOException("无法排版该章节", error)
         }
-        layouts[content.key] = chapter
+        layouts[renderKey] = chapter
         if (layouts.size > MAX_LAYOUTS) layouts.remove(layouts.keys.first())
         chapter
     }
+
+    private fun renderer(style: WenkuReadingStyle?) = WenkuTextRenderer(style ?: WenkuReadingStyle(), legacy = style == null)
 
     private suspend fun fetch(path: String, legacyText: Boolean = false): WenkuCachedChapter {
         val document = pages.get(path)

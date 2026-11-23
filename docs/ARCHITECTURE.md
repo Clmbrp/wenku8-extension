@@ -59,7 +59,15 @@
 - 阅读页按内容块顺序生成，连续文字沿用 `StaticLayout` 和 `Canvas`，每张插图占一页。标题绘制在首个页面，流中的说明段落保留在原位置。正文只有图片时也可生成有效页列表。
 - `WenkuIllustrations` 在本地图片请求触发时取一张原图，限制响应体和同时取图的数量。同站请求共享 HTML 队列和冷却，外域只以 HTTPS 访问且不携带站点 Cookie。先读原图尺寸，再采样解码，单张解码目标上限为 4096 像素边长和 400 万像素，输出 PNG 上限为 1000 × 2000。保留整幅图的比例，压缩后释放 Bitmap。每页独立失败且没有自动重试。
 - 纯文字页延续 `v1` 地址。含图章节使用 `v2` 地址，将标题、块类型、顺序、正文和图址纳入摘要。旧文字快照仍可用于恢复先前地址。升级后，如果 Mihon 持有旧的文字页列表，会先使用它，直到宿主刷新页面列表才出现新增插图。已经下载的章节继续使用原有下载文件。
-- 文字 PNG 自身是白底，通常有上下各 52 px 留白，页面高度随内容变化。没有标题的插图上下各 12 px 留白。Mihon 条漫使用内容高度，非连续模式另加 15 dp；黑底并显示「上一章／本章」的是宿主章节过渡页。 [Mihon 页间距](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/reader/viewer/webtoon/WebtoonPageHolder.kt) · [Mihon 章节过渡](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/reader/viewer/webtoon/WebtoonTransitionHolder.kt)
+- 1.6.11 文字 PNG 自身为白底，通常有上下各 52 px 留白，页面高度随内容变化。没有标题的插图上下各 12 px 留白。Mihon 条漫使用内容高度，非连续模式另加 15 dp；黑底并显示「上一章／本章」的是宿主章节过渡页。 [Mihon 页间距](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/reader/viewer/webtoon/WebtoonPageHolder.kt) · [Mihon 章节过渡](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/reader/viewer/webtoon/WebtoonTransitionHolder.kt)
+
+## 阶段 4.3 阅读样式与页列表刷新
+
+- 设置保存在每个来源的 `SharedPreferences`。`WenkuReadingStyle` 将列表选项转换为固定安全范围内的排版参数和成对的预设色。跟随模式优先读取 Mihon 的应用主题，再由 AppCompat 和系统夜间配置补充。每次生成页列表时读取一次，整章使用同一份样式快照。
+- `StaticLayout` 用调整后的字号、宽度和行距排版。段距只调整正文相邻换行形成的空行高度，保留正文字符和单独的换行。纯文字和混排仍按真实行边界逐页截取。非标题页上下 20 px，标题上方 52 px，短页继续随实际内容确定高度。插图的渲染背景随样式调整，保留原始颜色和固定的左右补边。 [Android LineHeightSpan](https://developer.android.com/reference/android/text/style/LineHeightSpan)
+- `v3` 页面 URL 包含渲染版本、已解析样式、章节路径、正文摘要和页码。排版和 PNG 缓存分别以该组合索引。磁盘章节快照继续使用与样式无关的 `v1` 和 `v2`。升级前的页面 URL 保留对应的旧排版，因此旧页仍可正确恢复。旧样式文件由 Mihon 原有缓存淘汰规则回收。
+- Mihon 在打开阅读器时先用宿主保存的页列表，来源 API 无法替换已经打开的列表。插件的「应用到已读章节」只在用户点击后扫描 Mihon 已知格式的 `chapter_disk_cache`，只失效能校验为同一 Wenku8 章节、同一摘要和旧样式的页列表文件。图片、其他来源、缓存索引和阅读进度留在原处；无法识别的缓存布局会跳过。宿主把页列表缺失视为缓存未命中，重开时再次调用来源，随后由插件按已有正文快照重新计算页数。仍保留磁盘快照的已读章节可在刷新后复用一次超过正常时效的正文。 [DiskLruCache 缓存未命中实现](https://github.com/JakeWharton/DiskLruCache/blob/master/src/main/java/com/jakewharton/disklrucache/DiskLruCache.java)
+- Mihon 的进度单位是页码。更改字号等参数后，旧页码对应的正文位置可能改变。
 
 ## 阶段划分和验证门槛
 
@@ -67,4 +75,5 @@
 - **[阶段 2 真机验证]** 该设备已完成 HTTPS 登录、人工验证和普通客户端榜单访问。会话续期、网络变化和其他设备的行为仍需观察。
 - **[阶段 3]** 用户已真机验证热门及最新翻页、书名搜索、封面、详情、分卷目录和 1.6.9 的限速冷却。
 - **[阶段 4.1]** 用户已在 Mihon 正式版验证真实文字章节、长章分页和重开。文字与站点一致。
-- **[阶段 4.2]** 已用真站保存的纯插图样本验证地址解析，并用合成混排与模拟图片响应验证排序、缓存、失败和尺寸约束。真实混排和 Android 图像解码留待真机验收。
+- **[阶段 4.2]** 用户已验证纯插图、卷首插图、真实混排顺序和 Android 图像解码。
+- **[阶段 4.3]** 以模拟正文和宿主页列表验证尺寸约束、缓存隔离与恢复，Mihon 正式版设置界面与跟随主题效果待真机验收。

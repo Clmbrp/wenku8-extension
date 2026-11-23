@@ -88,6 +88,33 @@ class WenkuDownloadTest {
     }
 
     @Test
+    fun `repeated style changes evict render plans while preserving original URLs and page order`() = runBlocking {
+        val html = List(48) { if (it % 2 == 0) "<p>第一段。</p>" else "<p>第二段。</p>" }.joinToString("")
+        val fixture = fixture(temporary.newFolder(), html) { error("no illustrations") }
+        val originalStyle = WenkuReadingStyle()
+        var style = originalStyle
+        val reader = fixture.reader { style }
+        val client = client(reader)
+        val original = wenkuMihonPages(reader.pageUrls(chapterPath))
+        assertEquals(48, original.size)
+        assertEquals(FIRST_TEXT, pngColor(getPng(client, original.first())))
+
+        repeat(12) { index ->
+            style = originalStyle.copy(bodySize = 43 + index, dark = index % 2 == 0)
+            val current = wenkuMihonPages(reader.pageUrls(chapterPath))
+            assertEquals(48, current.size)
+            assertFalse(original.first().url == current.first().url)
+            assertEquals(SECOND_TEXT, pngColor(getPng(client, current.last())))
+            assertEquals(FIRST_TEXT, pngColor(getPng(client, current[46])))
+        }
+
+        assertEquals(FIRST_TEXT, pngColor(getPng(client, original.first())))
+        assertEquals(originalStyle, fixture.renderedStyles.last())
+        assertEquals(14, fixture.renderedStyles.size)
+        assertEquals(1, fixture.htmlCalls)
+    }
+
+    @Test
     fun `cancelled illustration stays incomplete and retry rewrites partial PNG before offline archive reopen`() = runBlocking {
         val started = CompletableDeferred<Unit>()
         val cancelled = CompletableDeferred<Unit>()

@@ -57,8 +57,8 @@ internal data class WenkuReadingStyle(
     }
 
     companion object {
-        val BODY_SIZES = listOf(30, 34, 38, 42, 46, 50, 56, 62, 68, 72)
-        val HEADING_SIZES = listOf(36, 42, 48, 52, 58, 64, 72, 80, 88)
+        val BODY_SIZES = listOf(34, 42, 56)
+        val HEADING_SIZES = listOf(42, 52, 72)
         val LINE_SPACING = listOf(115, 135, 155, 175)
         val PARAGRAPH_GAPS = listOf(18, 0, 72)
         val SIDE_MARGINS = listOf(30, 46, 62, 80, 100)

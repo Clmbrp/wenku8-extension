@@ -86,9 +86,7 @@ internal fun wenkuReadingPreferences(screen: PreferenceScreen, preferences: Shar
         }
 
         fun sync(newValue: String) {
-            val options = presets.toMutableMap()
-            if (numberRange != null && newValue !in options) options[newValue] = "自定义 · $newValue$unit"
-            if (numberRange != null || color) options[CUSTOM_ENTRY] = "自定义…"
+            val options = wenkuReadingOptions(presets, newValue, numberRange != null, color, unit)
             item.entryValues = options.keys.toTypedArray()
             item.entries = options.values.toTypedArray()
             val style = if (color) wenkuReadingStyle(preferences, context) else null
@@ -120,7 +118,7 @@ internal fun wenkuReadingPreferences(screen: PreferenceScreen, preferences: Shar
         item.setOnPreferenceChangeListener { _, newValue ->
             val selected = newValue as? String ?: return@setOnPreferenceChangeListener false
             when {
-                selected == CUSTOM_ENTRY && numberRange != null -> {
+                numberRange != null && (selected == CUSTOM_ENTRY || selected !in presets) -> {
                     inputValue(
                         context,
                         label,
@@ -157,7 +155,7 @@ internal fun wenkuReadingPreferences(screen: PreferenceScreen, preferences: Shar
                     }
                     false
                 }
-                selected in presets || (numberRange != null && wenkuInteger(selected, numberRange) != null) -> {
+                selected in presets -> {
                     if (color) {
                         val dark = wenkuReadingStyle(preferences, context).dark
                         preferences.edit().remove(wenkuColorPreferenceKey(name, dark)).apply()
@@ -176,8 +174,9 @@ internal fun wenkuReadingPreferences(screen: PreferenceScreen, preferences: Shar
     fun numbers(name: String, label: String, presets: List<Int>, default: Int, range: IntRange, unit: String, labels: List<String> = presets.map { "$it$unit" }) = list(name, label, presets.map(Int::toString).zip(labels).toMap(), default.toString(), typography, range, unit)
 
     val defaults = WenkuReadingStyle()
-    numbers("body_size", "正文字号", WenkuReadingStyle.BODY_SIZES, defaults.bodySize, WenkuReadingStyle.BODY_RANGE, " px")
-    numbers("heading_size", "标题字号", WenkuReadingStyle.HEADING_SIZES, defaults.headingSize, WenkuReadingStyle.HEADING_RANGE, " px")
+    val sizes = listOf("小号", "标准", "大号")
+    numbers("body_size", "正文字号", WenkuReadingStyle.BODY_SIZES, defaults.bodySize, WenkuReadingStyle.BODY_RANGE, " px", sizes)
+    numbers("heading_size", "标题字号", WenkuReadingStyle.HEADING_SIZES, defaults.headingSize, WenkuReadingStyle.HEADING_RANGE, " px", sizes)
     numbers("line_spacing", "行距", WenkuReadingStyle.LINE_SPACING, defaults.lineSpacingPercent, WenkuReadingStyle.LINE_RANGE, "%", listOf("紧凑 · 115%", "标准 · 135%", "宽松 · 155%", "很宽松 · 175%"))
     numbers("paragraph_gap", "段落间距", WenkuReadingStyle.PARAGRAPH_GAPS, defaults.paragraphGap, WenkuReadingStyle.PARAGRAPH_RANGE, " px", listOf("紧凑 · 18 px", "标准（保留原空行）", "宽松 · 72 px"))
     numbers("side_margin", "左右页边距", WenkuReadingStyle.SIDE_MARGINS, defaults.horizontalMargin, WenkuReadingStyle.MARGIN_RANGE, " px")
@@ -230,6 +229,13 @@ internal fun wenkuReadingPreferences(screen: PreferenceScreen, preferences: Shar
 
 private const val CUSTOM_ENTRY = "custom"
 private data class ReadingPreference(val reset: () -> Unit, val sync: () -> Unit)
+
+internal fun wenkuReadingOptions(presets: Map<String, String>, value: String, numeric: Boolean, color: Boolean, unit: String): Map<String, String> = presets.toMutableMap().apply {
+    when {
+        numeric && value !in presets -> put(value, "自定义 · $value$unit")
+        numeric || color -> put(CUSTOM_ENTRY, "自定义…")
+    }
+}
 
 // ListPreference passes the summary to String.format when binding the row.
 internal fun wenkuLiteralListSummary(text: String?): String? = text?.replace("%", "%%")

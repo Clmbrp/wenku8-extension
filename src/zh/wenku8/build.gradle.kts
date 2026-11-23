@@ -27,7 +27,7 @@ tasks.matching { it.name.startsWith("ksp") && it.name.endsWith("UnitTestKotlin")
 
 keiyoushi {
     name = "轻小说文库"
-    versionCode = 14
+    versionCode = 15
     // Provisional until the site's content has been assessed.
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"

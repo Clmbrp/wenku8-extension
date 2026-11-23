@@ -1,11 +1,5 @@
 package eu.kanade.tachiyomi.extension.zh.wenku8
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -26,35 +20,13 @@ internal class WenkuRequestPolicy(
     private val wallMillis: () -> Long = System::currentTimeMillis,
     private val pause: suspend (Long) -> Unit = { delay(it) },
 ) {
-    private class Flight(val document: Deferred<Document>, var readers: Int = 0)
-
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val flights = mutableMapOf<Pair<HttpUrl, String?>, Flight>()
+    private val flights = WenkuFlights<Pair<HttpUrl, String?>, Document>()
     private val gate = Mutex()
     private var lastStart: Long? = null
     private var lastSearchStart: Long? = null
     private var cooldownUntil = 0L
 
-    suspend fun page(url: HttpUrl, searchKeyword: String?, load: suspend () -> Document): Document {
-        currentCoroutineContext().ensureActive()
-        val key = url to searchKeyword
-        val flight = synchronized(flights) {
-            val active = flights[key]?.takeUnless { it.document.isCompleted }
-                ?: Flight(scope.async(start = CoroutineStart.LAZY) { load() }).also { flights[key] = it }
-            active.readers++
-            active
-        }
-        try {
-            return flight.document.await()
-        } finally {
-            synchronized(flights) {
-                if (--flight.readers == 0) {
-                    flights.remove(key, flight)
-                    flight.document.cancel()
-                }
-            }
-        }
-    }
+    suspend fun page(url: HttpUrl, searchKeyword: String?, load: suspend () -> Document): Document = flights.await(url to searchKeyword, load)
 
     suspend fun <T> exchange(searchResults: Boolean, retryOnRateLimit: Boolean = true, load: suspend () -> T): T = try {
         dispatch(searchResults, load)

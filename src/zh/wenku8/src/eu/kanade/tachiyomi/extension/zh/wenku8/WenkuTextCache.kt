@@ -50,8 +50,14 @@ internal class WenkuTextCache(
     private val now: () -> Long = System::currentTimeMillis,
     private val legacyDirectory: File? = null,
 ) {
+    private data class Parsed(val chapter: WenkuCachedChapter, val length: Long, val modified: Long, val original: File)
+
+    private val parsed = WenkuMemoryCache<WenkuTextKey, Parsed>(6, 1_024 * 1_024) { it.chapter.content.payloadWeight() }
+    private var lastMaintenance: Long? = null
+
     @Synchronized
     fun fresh(chapterPath: String, allowExpired: Boolean = false): WenkuCachedChapter? {
+        maintain()
         val prefix = filePrefix(chapterPath)
         return entries().asSequence().filter { it.name.startsWith(prefix) }
             .filter { allowExpired || now() - it.lastModified() in 0..FRESH_MILLIS }
@@ -64,14 +70,28 @@ internal class WenkuTextCache(
 
     @Synchronized
     fun read(key: WenkuTextKey): WenkuCachedChapter? {
+        maintain()
         if (!REVISION.matches(key.revision)) return null
         return readFile(key, File(directory, fileName(key)))
             ?: legacyDirectory?.takeIf { key.version == 1 }?.let { readFile(key, File(it, fileName(key))) }
     }
 
+    @Synchronized
+    fun hasSnapshot(chapterPath: String): Boolean {
+        val prefix = filePrefix(chapterPath)
+        return entries().any { it.name.startsWith(prefix) }
+    }
+
     private fun readFile(key: WenkuTextKey, file: File): WenkuCachedChapter? {
         try {
-            if (file.length() !in 1L..MAX_ENTRY_BYTES) return null
+            val length = file.length()
+            val modified = file.lastModified()
+            val cached = parsed[key]
+            if (cached?.original == file) {
+                if (cached.length == length && cached.modified == modified) return cached.chapter
+                parsed.remove(key)
+            }
+            if (length !in 1L..MAX_ENTRY_BYTES) return null
             val bytes = file.readBytes()
             if (digest(bytes) != key.revision) return null
             val data = bytes.toString(Charsets.UTF_8)
@@ -83,7 +103,7 @@ internal class WenkuTextCache(
                 if (title.isBlank() || body.isBlank()) return null
                 WenkuChapterContent(title, listOf(WenkuContentBlock.TextBlock(body)))
             } ?: return null
-            return WenkuCachedChapter(key, content)
+            return WenkuCachedChapter(key, content).also { parsed.put(key, Parsed(it, length, modified, file)) }
         } catch (_: IOException) {
             return null
         } catch (_: IllegalArgumentException) {
@@ -102,6 +122,7 @@ internal class WenkuTextCache(
 
     @Synchronized
     fun remember(chapterPath: String, content: WenkuChapterContent): WenkuCachedChapter {
+        maintain()
         val mixed = content.blocks.any { it is WenkuContentBlock.ImageBlock }
         val stored = if (mixed) {
             content
@@ -115,22 +136,27 @@ internal class WenkuTextCache(
             encodeText(stored.textForReader())
         }
         val key = WenkuTextKey(chapterPath, digest(bytes), if (mixed) 2 else 1)
+        val chapter = WenkuCachedChapter(key, stored)
         if (bytes.size <= MAX_ENTRY_BYTES) {
             try {
                 directory.mkdirs()
-                val pending = File.createTempFile("pending-", ".tmp", directory)
-                try {
-                    pending.writeBytes(bytes)
-                    Files.move(pending.toPath(), File(directory, fileName(key)).toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-                } finally {
-                    pending.delete()
+                val target = File(directory, fileName(key))
+                if (readFile(key, target) == null || !target.setLastModified(now())) {
+                    val pending = File.createTempFile("pending-", ".tmp", directory)
+                    try {
+                        pending.writeBytes(bytes)
+                        Files.move(pending.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                    } finally {
+                        pending.delete()
+                    }
                 }
-                prune()
+                parsed.put(key, Parsed(chapter, target.length(), target.lastModified(), target))
+                prune(keepFirst = target)
             } catch (_: IOException) {
                 // Reading can still use the in-memory layout when app cache storage is unavailable.
             }
         }
-        return WenkuCachedChapter(key, stored)
+        return chapter
     }
 
     private fun encodeText(text: WenkuChapterText): ByteArray = "${text.title}\n${text.body}".encodeToByteArray()
@@ -163,11 +189,29 @@ internal class WenkuTextCache(
         return WenkuChapterContent(title, blocks).takeIf { blocks.any { it is WenkuContentBlock.ImageBlock } }
     }
 
-    private fun prune() {
+    private fun maintain() {
+        val time = now()
+        val last = lastMaintenance
+        if (last != null && time - last in 0 until MAINTENANCE_INTERVAL) return
+        lastMaintenance = time
+        directory.listFiles { file -> PENDING_FILE.matches(file.name) && file.isFile }?.forEach { file ->
+            if (file.lastModified() > 0L && time - file.lastModified() >= ORPHAN_AGE) file.delete()
+        }
+        prune()
+    }
+
+    private fun prune(keepFirst: File? = null) {
         var keptBytes = 0L
-        entries().sortedByDescending(File::lastModified).forEachIndexed { index, file ->
-            keptBytes += file.length()
-            if (index >= MAX_ENTRIES || keptBytes > MAX_CACHE_BYTES) file.delete()
+        val files = entries().sortedWith(compareByDescending<File> { it == keepFirst }.thenByDescending(File::lastModified))
+        var keptEntries = 0
+        for (file in files) {
+            val length = file.length()
+            if (keptEntries < MAX_ENTRIES && length in 1L..MAX_ENTRY_BYTES && length <= MAX_CACHE_BYTES - keptBytes) {
+                keptBytes += length
+                keptEntries++
+            } else {
+                file.delete()
+            }
         }
     }
 
@@ -184,10 +228,13 @@ internal class WenkuTextCache(
 
     companion object {
         private const val FRESH_MILLIS = 20 * 60 * 1_000L
+        private const val MAINTENANCE_INTERVAL = 60 * 60 * 1_000L
+        private const val ORPHAN_AGE = 24 * MAINTENANCE_INTERVAL
         private const val MAX_ENTRY_BYTES = 4 * 1_024 * 1_024L
         private const val MAX_ENTRIES = 24
         private const val MAX_CACHE_BYTES = 16 * 1_024 * 1_024L
         private val REVISION = Regex("[a-f0-9]{64}")
         private val CACHE_FILE = Regex("\\d+-\\d+-\\d+-[a-f0-9]{64}\\.(txt|json)")
+        private val PENDING_FILE = Regex("pending-\\d+\\.tmp")
     }
 }

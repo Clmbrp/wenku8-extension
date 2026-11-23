@@ -56,7 +56,7 @@ abstract class Wenku8 :
     }.build()
 
     private val pages by lazy { WenkuPages(client, headers, baseUrl.siteUrl(), diagnostics) }
-    private val browse by lazy { WenkuBrowse(pages, baseUrl.siteUrl()) }
+    private val browse by lazy { WenkuBrowse(pages, baseUrl.siteUrl(), diagnostics) }
 
     override suspend fun getPopularManga(page: Int): MangasPage = browse.popular(page).toMangasPage()
 

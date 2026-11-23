@@ -8,9 +8,19 @@ import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-internal data class WenkuBookPage(val books: List<WenkuBook>, val hasNextPage: Boolean = false)
+internal data class WenkuBookPage(val books: List<WenkuBook>, val next: HttpUrl? = null) {
+    val hasNextPage: Boolean get() = next != null
+}
 
-internal class WenkuBrowse(private val pages: WenkuPages, private val origin: HttpUrl) {
+internal class WenkuBrowse(
+    private val pages: WenkuPages,
+    private val origin: HttpUrl,
+    private val diagnostics: WenkuDiagnostics? = null,
+) {
+    private data class SearchContinuation(val url: HttpUrl, val previousBook: WenkuBook)
+
+    private val searchLinks = LinkedHashMap<Pair<String, Int>, SearchContinuation>(16, 0.75f, true)
+
     suspend fun popular(page: Int): WenkuBookPage = ranking(page, "allvisit")
 
     suspend fun latest(page: Int): WenkuBookPage = ranking(page, "lastupdate")
@@ -20,7 +30,7 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
         val document = pages.get("$TOPLIST?sort=$sort&page=$page")
         return listing(document, page, isSearch = false) {
             it.encodedPath == TOPLIST && it.queryParameter("sort") == sort
-        }
+        } ?: structure("未识别到排行榜书目，网站结构可能已变化")
     }
 
     suspend fun search(page: Int, query: String): WenkuBookPage {
@@ -29,6 +39,16 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
         if (keyword.isEmpty()) return WenkuBookPage(emptyList())
         if (!GBK.newEncoder().canEncode(keyword)) structure("搜索词含网站不支持的字符")
 
+        val continuation = synchronized(searchLinks) { searchLinks[keyword to page] }
+        return try {
+            search(keyword, page, continuation)
+        } catch (e: WenkuAccessException) {
+            diagnostics?.search(page, e.failure.name, continuation != null)
+            throw e
+        }
+    }
+
+    private suspend fun search(keyword: String, page: Int, continuation: SearchContinuation?): WenkuBookPage {
         val document = if (page == 1) {
             val body = FormBody.Builder(GBK)
                 .add("searchtype", "articlename")
@@ -36,7 +56,9 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
                 .add("charset", "gbk")
                 .add("Submit", "轻小说搜索")
                 .build()
-            pages.searchForm(body)
+            pages.searchForm(keyword, body)
+        } else if (continuation != null) {
+            pages.get(continuation.url.toString())
         } else {
             val encoded = URLEncoder.encode(keyword, GBK.name())
             pages.get("$SEARCH?searchtype=articlename&searchkey=$encoded&page=$page")
@@ -44,12 +66,39 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
         val url = document.location().toHttpUrlOrNull()
         if (page == 1 && url != null && url.hasWenkuOrigin(origin) && WenkuParser.BOOK_PATH.matches(url.encodedPath)) {
             val book = WenkuParser.details(document, origin)
+            synchronized(searchLinks) { searchLinks.keys.removeAll { it.first == keyword } }
+            diagnostics?.search(page, "DETAIL", false)
             return WenkuBookPage(listOf(WenkuBook(book.title, url.encodedPath, book.coverUrl)))
         }
-        return listing(document, page, isSearch = true) { target ->
+        val matchesSearch = { target: HttpUrl ->
             target.encodedPath == SEARCH && target.queryParameter("searchtype").let { it == null || it == "articlename" } &&
                 target.gbkQueryParameter("searchkey").let { it == null || it.equals(keyword, ignoreCase = true) }
         }
+        val parsed = listing(document, page, isSearch = true, matchesSearch)
+        val result = if (parsed == null && continuation != null) {
+            diagnostics?.search(page, "RETRY_MISSING", true)
+            listing(pages.get(continuation.url.toString()), page, isSearch = true, matchesSearch)
+        } else {
+            parsed
+        } ?: structure("未识别到搜索结果，网站结构可能已变化")
+        synchronized(searchLinks) {
+            if (page == 1) searchLinks.keys.removeAll { it.first == keyword }
+            val nextKey = keyword to (page + 1)
+            val next = result.next
+            if (next == null) {
+                searchLinks.remove(nextKey)
+            } else {
+                searchLinks[nextKey] = SearchContinuation(next, result.books.first())
+                if (searchLinks.size > MAX_SEARCH_LINKS) searchLinks.remove(searchLinks.keys.first())
+            }
+        }
+        if (result.books.isEmpty() && continuation != null) {
+            diagnostics?.search(page, "EMPTY_TAIL", true)
+            // Mihon treats an empty append as an error. Its paging session filters this known prior URL.
+            return WenkuBookPage(listOf(continuation.previousBook))
+        }
+        diagnostics?.search(page, if (result.books.isEmpty()) "EMPTY" else "LIST", continuation != null)
+        return result
     }
 
     private fun listing(
@@ -57,7 +106,7 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
         page: Int,
         isSearch: Boolean,
         matchesList: (HttpUrl) -> Boolean,
-    ): WenkuBookPage {
+    ): WenkuBookPage? {
         val url = document.location().toHttpUrlOrNull()?.takeIf { it.hasWenkuOrigin(origin) }
             ?: structure("列表地址不符合预期")
         val formResult = isSearch && page == 1 && url.encodedPath == SEARCH_FORM
@@ -70,11 +119,11 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
         }
         val books = tables.firstNotNullOfOrNull { table -> booksIn(table).takeIf(List<WenkuBook>::isNotEmpty) }
         if (books == null) {
-            if (isSearch && page == 1 && emptySearch(document, tables)) return WenkuBookPage(emptyList())
-            structure(if (isSearch) "未识别到搜索结果，网站结构可能已变化" else "未识别到排行榜书目，网站结构可能已变化")
+            if (isSearch && emptySearch(document, tables)) return WenkuBookPage(emptyList())
+            return null
         }
 
-        return WenkuBookPage(books, hasNextPage(document, page, matchesList))
+        return WenkuBookPage(books, nextPage(document, url, page, matchesList))
     }
 
     private fun booksIn(table: Element): List<WenkuBook> = table.select("a[href]")
@@ -94,11 +143,11 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
             if (cover == null) WenkuBook(title, path) else WenkuBook(title, path, cover)
         }
 
-    private fun hasNextPage(document: Document, page: Int, matchesList: (HttpUrl) -> Boolean): Boolean {
+    private fun nextPage(document: Document, currentUrl: HttpUrl, page: Int, matchesList: (HttpUrl) -> Boolean): HttpUrl? {
         val pager = document.selectFirst("#pagelink, div.pagelink")
         if (pager == null) {
-            if (page != 1) structure("缺少列表分页信息，无法确认当前页")
-            return false
+            if (page != 1 && currentUrl.queryParameter("page") == null) structure("缺少列表分页信息，无法确认当前页")
+            return null
         }
         val total = pager.selectFirst("#pagestats")?.let {
             val stats = PAGE_STATS.matchEntire(it.text())
@@ -109,18 +158,22 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
         }
         val selected = pager.selectFirst("strong")?.text()?.toIntOrNull()
         if (selected != null && selected != page) structure("网站返回了非预期的页码")
+        if (total == page) return null
 
         // Mihon requests page + 1. Only advertise a next page if the site links to it.
-        val links = pager.select("a[href]").mapNotNull { link ->
+        val links = pager.select("a[href]").sortedByDescending { it.hasClass("next") }.mapNotNull { link ->
             val target = link.absUrl("href").toHttpUrlOrNull() ?: return@mapNotNull null
             if (!target.hasWenkuOrigin(origin) || !matchesList(target)) return@mapNotNull null
-            target.queryParameter("page")?.toIntOrNull()
+            val targetPage = target.queryParameter("page")?.toIntOrNull() ?: return@mapNotNull null
+            targetPage to target
         }
-        val next = links.any { it > page && it - page == 1 }
-        if ((total != null && (page < total) != next) || (!next && links.any { it > page })) {
+        val next = links.firstOrNull { (targetPage, _) -> targetPage > page && targetPage - page == 1 }?.second
+        if (next == null && (total != null || links.any { it.first > page })) {
             structure("网站分页导航与当前页不一致")
         }
-        if (page > 1 && total == null && selected == null && !next) structure("无法确认网站返回的列表页码")
+        if (page > 1 && selected == null && next == null && currentUrl.queryParameter("page") == null) {
+            structure("无法确认网站返回的列表页码")
+        }
         return next
     }
 
@@ -155,7 +208,8 @@ internal class WenkuBrowse(private val pages: WenkuPages, private val origin: Ht
     companion object {
         const val SEARCH_FORM = "/so.php"
         private const val TOPLIST = "/modules/article/toplist.php"
-        private const val SEARCH = "/modules/article/search.php"
+        const val SEARCH = "/modules/article/search.php"
+        private const val MAX_SEARCH_LINKS = 64
         private val GBK = charset("GBK")
         private val PAGE_STATS = Regex("""(\d+)\s*/\s*(\d+)""")
         private val READING_LINK_TEXT = setOf("我要阅读", "阅读", "加入书架", "推荐本书")

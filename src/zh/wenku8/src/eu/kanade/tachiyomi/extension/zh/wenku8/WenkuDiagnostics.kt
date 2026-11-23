@@ -32,6 +32,10 @@ internal class WenkuDiagnostics(private val log: (String) -> Unit) {
         log("result stage=$stage kind=$kind")
     }
 
+    fun search(page: Int, kind: String, usedNextLink: Boolean) {
+        log("search page=$page kind=$kind usedNextLink=$usedNextLink")
+    }
+
     fun cover(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url

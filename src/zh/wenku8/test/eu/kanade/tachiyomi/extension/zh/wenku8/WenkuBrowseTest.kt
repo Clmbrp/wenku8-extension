@@ -89,6 +89,99 @@ class WenkuBrowseTest {
     }
 
     @Test
+    fun `search follows the complete next link from the successful first page`() = runBlocking {
+        val next = "$search&searchid=123&page=2"
+        val browse = browse { request ->
+            when {
+                request.method == "POST" -> reply(request, code = 302, location = search)
+                request.url.queryParameter("page") == null -> reply(
+                    request,
+                    grid("""<a href="/book/42.htm">首屏结果</a>""", pager(1, 2, "$search&searchid=123")),
+                )
+                request.url == origin.resolve(next) -> reply(
+                    request,
+                    grid("""<a href="/book/43.htm">下一页结果</a>""", pager(2, 2, "$search&searchid=123")),
+                )
+                else -> reply(request, "<div id='content'>搜索会话已失效</div>")
+            }
+        }
+        assertTrue(browse.search(1, "化").hasNextPage)
+        assertEquals(WenkuBookPage(listOf(WenkuBook("下一页结果", "/book/43.htm"))), browse.search(2, "化"))
+    }
+
+    @Test
+    fun `advertised search page recovers from one successful HTTP response without books`() = runBlocking {
+        var secondPageRequests = 0
+        val browse = browse { request ->
+            when {
+                request.method == "POST" -> reply(request, code = 302, location = search)
+                request.url.queryParameter("page") == null -> reply(
+                    request,
+                    grid("""<a href="/book/42.htm">首屏结果</a>""", pager(1, 2, search)),
+                )
+                ++secondPageRequests == 1 -> reply(request, "<div id='content'>暂时没有可解析的列表</div>")
+                else -> reply(request, grid("""<a href="/book/43.htm">下一页结果</a>""", pager(2, 2, search)))
+            }
+        }
+        assertTrue(browse.search(1, "化").hasNextPage)
+        assertEquals(WenkuBookPage(listOf(WenkuBook("下一页结果", "/book/43.htm"))), browse.search(2, "化"))
+        assertEquals(2, secondPageRequests)
+    }
+
+    @Test
+    fun `persistently unrecognized advertised results still report a structure error`() = runBlocking {
+        var secondPageRequests = 0
+        val browse = browse { request ->
+            when {
+                request.method == "POST" -> reply(request, code = 302, location = search)
+                request.url.queryParameter("page") == null -> reply(
+                    request,
+                    grid("""<a href="/book/42.htm">首屏结果</a>""", pager(1, 2, search)),
+                )
+                else -> {
+                    secondPageRequests++
+                    reply(request, "<div id='content'>未识别结构</div>")
+                }
+            }
+        }
+        assertTrue(browse.search(1, "化").hasNextPage)
+        val error = assertThrows(WenkuAccessException::class.java) { runBlocking { browse.search(2, "化") } }
+        assertEquals(AccessFailure.STRUCTURE, error.failure)
+        assertEquals(2, secondPageRequests)
+    }
+
+    @Test
+    fun `an advertised search page that is explicitly empty can end pagination`() = runBlocking {
+        val browse = browse { request ->
+            when {
+                request.method == "POST" -> reply(request, code = 302, location = search)
+                request.url.queryParameter("page") == null -> reply(
+                    request,
+                    grid("""<a href="/book/42.htm">首屏结果</a>""", pager(1, 2, search)),
+                )
+                else -> reply(request, """<div id="content">对不起，没有找到符合您要求的小说！</div>""")
+            }
+        }
+        val first = browse.search(1, "化")
+        val last = browse.search(2, "化")
+        assertFalse(last.hasNextPage)
+        assertEquals(first.books, last.books)
+        assertEquals(emptyList<WenkuBook>(), last.books.filterNot { it in first.books })
+    }
+
+    @Test
+    fun `search ignores a stale next link when the pager confirms the last page`() = runBlocking {
+        val browse = browse { request ->
+            val nav = """<div id="pagelink"><em id="pagestats">2/2</em><strong>2</strong>
+                <a class="next" href="$search&page=3">下一页</a></div>"""
+            reply(request, grid("""<a href="/book/43.htm">最后一页结果</a>""", nav))
+        }
+        val last = browse.search(2, "化")
+        assertEquals("/book/43.htm", last.books.single().path)
+        assertFalse(last.hasNextPage)
+    }
+
+    @Test
     fun `search handles the full-title redirect as a single book`() = runBlocking {
         val requests = mutableListOf<Pair<String, String>>()
         val browse = browse { request ->
@@ -152,7 +245,7 @@ class WenkuBrowseTest {
     private data class Failure(val code: Int, val location: String?, val html: String, val expected: AccessFailure)
 
     private fun browse(respond: (Request) -> Response): WenkuBrowse =
-        WenkuBrowse(WenkuPages(OkHttpClient(), headersOf(), origin, executeRequest = { respond(it) }), origin)
+        WenkuBrowse(WenkuPages(OkHttpClient(), headersOf(), origin, policy = WenkuRequestPolicy(intervalMillis = 0, searchIntervalMillis = 0), executeRequest = { respond(it) }), origin)
 
     private fun reply(request: Request, html: String = "", code: Int = 200, location: String? = null): Response =
         Response.Builder()

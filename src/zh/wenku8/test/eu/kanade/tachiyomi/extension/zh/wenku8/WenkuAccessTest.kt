@@ -150,7 +150,8 @@ class WenkuAccessTest {
             Triple(200, "<title>Just a moment...</title>", AccessFailure.CHALLENGE),
             Triple(429, "<title>Just a moment...</title>", AccessFailure.RATE_LIMITED),
         )) {
-            val pages = WenkuPages(OkHttpClient(), headersOf(), origin) { response(it.url, status, html.toByteArray()) }
+            val policy = WenkuRequestPolicy(intervalMillis = 0, fallbackCooldownMillis = 0)
+            val pages = WenkuPages(OkHttpClient(), headersOf(), origin, policy = policy) { response(it.url, status, html.toByteArray()) }
             val error = assertThrows(WenkuAccessException::class.java) { runBlocking { pages.get("/top.php") } }
             assertEquals(expected, error.failure)
         }

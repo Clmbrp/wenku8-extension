@@ -40,13 +40,19 @@ internal class WenkuSession(private val cookieJar: CookieJar) {
 internal object WenkuErrors {
     fun loginRequired(hadLoginCookie: Boolean): Nothing {
         val kind = if (hadLoginCookie) AccessFailure.SESSION_EXPIRED else AccessFailure.LOGIN_REQUIRED
-        val message = if (hadLoginCookie) "登录可能已失效，请在来源的 WebView 中重新登录" else "请在来源的 WebView 中登录"
+        val message = if (hadLoginCookie) {
+            "站点仍要求登录，会话可能已失效。请使用来源 WebView 的 HTTPS 账号登录入口。"
+        } else {
+            "站点要求登录，请使用来源 WebView 的 HTTPS 账号登录入口。"
+        }
         throw WenkuAccessException(kind, message)
     }
 
     fun checkStatus(code: Int, challenge: Boolean) {
         if (code == 429) throw WenkuAccessException(AccessFailure.RATE_LIMITED, "访问过于频繁，请稍后再试")
-        if (challenge) throw WenkuAccessException(AccessFailure.CHALLENGE, "网站要求验证，请在来源的 WebView 中手动处理")
+        if (challenge) {
+            throw WenkuAccessException(AccessFailure.CHALLENGE, "网站要求安全验证。请在来源设置切换到「站点安全验证」，打开来源 WebView 手动处理。")
+        }
         if (code == 403) throw WenkuAccessException(AccessFailure.FORBIDDEN, "网站拒绝访问（403）；请检查站点限制或在 WebView 中查看")
         if (code !in 200..299) throw WenkuAccessException(AccessFailure.HTTP, "网站返回 HTTP $code")
     }

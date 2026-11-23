@@ -1,9 +1,12 @@
 package eu.kanade.tachiyomi.extension.zh.wenku8
 
 import okhttp3.HttpUrl
+import okhttp3.Interceptor
 import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
 
-/** Redacted phase-2 trace. The source only enables this in Debug builds. */
+/** Redacted trace. The source only enables this in Debug builds. */
 internal class WenkuDiagnostics(private val log: (String) -> Unit) {
     fun session(url: HttpUrl, hasLoginCookie: Boolean) {
         log("session url=${url.forTrace()} loginCookieVisible=$hasLoginCookie")
@@ -27,6 +30,24 @@ internal class WenkuDiagnostics(private val log: (String) -> Unit) {
 
     fun result(stage: String, kind: String) {
         log("result stage=$stage kind=$kind")
+    }
+
+    fun cover(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val url = request.url
+        if (!WenkuCover.isKnownUrl(url)) return chain.proceed(request)
+        val address = "${url.scheme}://${url.host}${url.encodedPath}"
+        return try {
+            val response = chain.proceed(request)
+            val finalUrl = response.request.url
+            val finalTarget = if (WenkuCover.isKnownUrl(finalUrl)) finalUrl.scheme else "<other>"
+            val isImage = response.body.contentType()?.type == "image"
+            log("cover url=$address status=${response.code} image=$isImage finalTarget=$finalTarget")
+            response
+        } catch (e: IOException) {
+            log("cover url=$address kind=NETWORK")
+            throw e
+        }
     }
 
     private fun HttpUrl.forTrace(): String {

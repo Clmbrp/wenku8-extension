@@ -8,6 +8,9 @@
 
 ## 本次环境与访问结果
 
+- **[阶段 2 真机通过，用户提供]** Wenku8 1.6.4 从来源 WebView 的 HTTPS 入口可完成账号登录。仅完成登录时热门榜仍可能提示安全验证。访问受保护页面并手动完成站点验证后，用户重新打开 HTTPS 入口登录，关闭 WebView 后刷新热门榜，Mihon 显示真实书目。这验证了该设备、会话和网络中的普通客户端访问。会话变化或网络变化后仍可能出现拦截。
+- **[阶段 3]** 已接入热门封面、详情和目录，封面链路及真机验收状态见下节。
+
 - **[2026-11-23 用户 Chrome 实测]** 在同一 Android 手机的 Chrome，`https://www.wenku8.net/login.php` 登录页、`POST https://www.wenku8.net/login.php?do=submit` 表单和 `https://www.wenku8.net/checkcode.php` 验证码图片均使用 HTTPS，用户报告该浏览器可登录。同一手机 Mihon WebView 显示 HTTP 登录地址并报告校验码错误；这不证明两者使用相同会话或请求链。
 - **[2026-11-23 设备及源码]** 已连接设备的包管理器报告插件版本 `1.6.3`、Mihon `0.21.3`。对照 [Mihon v0.21.3 来源页面](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt)、[WebView 导航](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/presentation/webview/WebViewScreenContent.kt)与 [CookieJar](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/core/common/src/main/kotlin/eu/kanade/tachiyomi/network/AndroidCookieJar.kt)：来源浏览页初始地址取 `getHomeUrl()`；宿主后续导航允许同主机 HTTP；默认 CookieJar 使用 Android `CookieManager`。Wenku8 1.6.3 代码提供 HTTPS 登录初始地址，插件的 OkHttp 跳转检查不控制宿主 WebView 后续导航，也不能保证表单或验证码请求共用有效会话。设备上未发现可用 WebView 远程调试通道，未获取本次导航链或请求 Cookie。
 - **[源码对比]** Wenku8 没有覆盖 `headersBuilder()`，使用宿主默认 User-Agent；BiliNovel 显式添加了自己网站使用的 User-Agent、Referer 和语言等请求头。两站行为不同，不能由 BiliNovel 可登录推断 Wenku8 必须采用这些值；不能据此断定 UA 或 Cookie 为降级根因。站点重定向、页面导航、宿主导航处理及设备会话均为待证实可能性。
@@ -65,6 +68,16 @@
 - **[样本] 正文结构：** `chapter.html` 的 `#content` 包含文本节点和 `<br>`，无内容图片；`chapter_image.html` 的 `#content` 包含 6 个 `div.divimage`，各有包在链接中的 `img.imagecontent`，无章节正文文本；两者首尾均有 `ul#contentdp` 导航，不应作为正文。正文处理应按 DOM 顺序遍历并形成有序文本块与图片块，不得因为没有文字而舍弃纯插图章节，也不得将图片统一移到末尾。**[不确定]** 此次没有实际混排样本；第三种混排用虚构样本覆盖设计，现网结构仍需验证。
 - **[样本] 图片地址：** 插图章节 `/novel/0/6/13917.htm` 的 6 个 `img[src]` 指向 `https://pic.777743.xyz/0/6/13917/31756.jpg` 至 `31761.jpg`，图片所在 `<a href>` 也指向图片；详情和搜索封面样本使用 `http://img.wenku8.com/...`。**[浏览器证据]** 已登录 Chrome 在禁用缓存后，以 HTTPS GET 获取其中 `31759.jpg`，返回 HTTP 200、`Content-Type: image/jpeg`、`Content-Length: 63612`、`Cf-Cache-Status: HIT`。这证明该次浏览器获取成功，`HIT` 是服务器侧缓存状态，不能据此推断其余图片、其他小说或 Mihon 均可访问。**[不确定]** 真实相对图片路径、域名归属、重定向、Referer/Cookie 要求和 Android 明文流量策略仍待验证；相对 `src` 按响应最终页面 URL（若有 HTML `base` 则遵循其语义并校验目标）解析，虚构混排样本仅测试通用规则。不能将第三方图片域视作已授权，也不应推导替换域名。
 - **[不确定] 访问约束：** 保留图片原始 URL 并在后续设备上确认宿主网络安全策略、响应状态、重定向、Referer、Cookie 作用域和网站使用规则；不向跨域图片主机主动附加站点 Cookie 或敏感请求头，不为绕过限制而降级 HTTPS 或更换域名。
+
+## 阶段 3 第一批：封面、详情和目录
+
+- **[样本] 原始封面地址。** `detail.html` 的主封面为 `http://img.wenku8.com/image/0/6/6s.jpg`，`search.html` 的 20 个封面符合 `/image/{ID 除以 1000 取整}/{ID}/{ID}s.jpg`。总热度榜的书籍链接提供 ID，没有封面字段。章节插图样本使用 `pic.777743.xyz`，与这些封面属于不同站点。
+- **[电脑实测] 封面 HTTPS。** 对 `img.wenku8.com` 的两个样本进行过匿名 GET，`/image/0/6/6s.jpg` 和 `/image/1/1973/1973s.jpg` 的 HTTPS 响应均为 HTTP 200、`image/jpeg`，分别为 17,745 和 17,983 字节。请求未附加 Referer，说明这些电脑端样本可直接获取。LiteTale 的图片下载实现附加 Referer，属于该项目的请求策略，Android 所用网络是否另有要求仍待验证。 [LiteTale 图片请求源码](https://github.com/metaMMY07/LiteTale/blob/ab4129b56e8825d375979d8f8dff77dfd44a1266/rust/src/wenku8/client.rs)
+- **[源码] 区分网页与 Mihon 的失败。** HTTPS 网页引用 HTTP 封面会触发 WebView 的混合内容策略。Mihon v0.21.3 的 WebView 未显式放开该模式。用户报告过网页破图，缺少对应的请求结果，具体原因仍待确认。原生列表和详情封面由 Mihon 的 `MangaCoverFetcher` 读取 `thumbnail_url`，使用来源的 OkHttp 客户端和 `headers` 请求，不经过 WebView。1.6.4 的热门列表尚未填充 `thumbnail_url`，截图中的占位图无法说明 CDN 请求结果。 [Android WebView 文档](https://developer.android.com/reference/android/webkit/WebSettings#setMixedContentMode(int)) · [Mihon WebView](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/presentation/webview/WebViewScreenContent.kt) · [Mihon 封面加载器](https://github.com/mihonapp/mihon/blob/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/data/coil/MangaCoverFetcher.kt)
+- **[已实现／单元测试] 封面解析。** 详情页按响应 URL 和 HTML `base` 语义解析 `img[src]`。仅采纳默认端口、无用户信息、且图片路径与当前书籍 ID 一致的 `img.wenku8.com` 封面，使用已验证的 HTTPS 地址。榜单及缺图的详情以该 CDN 的已知规则填充 URL。维持宿主默认请求头与 TLS 校验。Debug 版按已知封面路径记录响应状态、媒体类型是否为图片和最终目标是否仍为已知 CDN 路径；连接失败记录 `NETWORK`，日志不包含 URL 查询参数、Cookie、认证头或响应体。
+- **[已实现／单元测试] 详情和目录。** 详情从 `#content` 提取标题、作者、简介、分类、状态及封面；缺少可选字段时可用同书目录或封面识别详情结构。按详情页给出的同书目录链接请求 `table.css`，从 `td.vcss` 获取卷名，从 `td.ccss > a[href]` 获取章名与链接。目录保留站点卷章顺序和插图条目，按同书规范路径去重，传给 Mihon 时转为新章在前的来源顺序。LightNovelReader 的选择器支持这一结构，LiteTale 的目录解析使用相同的卷章单元格，但取带 `aid`/`cid` 的另一种链接。 [LightNovelReader 选择器](https://github.com/Xempastissimo/LightNovelReader/blob/16ebd0dd2ee82c7cc159595f9e26e8cab1dfda50/app/src/main/java/com/xempastissimo/lightnovelreader/data/source/wenku8/Wenku8Selectors.kt) · [LiteTale 目录解析](https://github.com/metaMMY07/LiteTale/blob/ab4129b56e8825d375979d8f8dff77dfd44a1266/rust/src/wenku8/client.rs)
+- **[本地样本回放]** 1.6.6 从已保存的书籍详情和目录提取出标题、作者、简介、封面和分属三个卷组的 21 个目录条目，包含「上卷 插图」`/novel/0/6/13917.htm`。回放使用原始样本的本地保存内容，没有向站点发起请求。
+- **[待 Android 验证]** 1.6.6 在同一会话中能否加载热门封面、书籍详情和多卷目录，仍需在设备上确认。若封面仍失败，用 `adb logcat -d -s Wenku8Access:D` 筛选 `cover` 行，区分无实际请求、连接失败、HTTP 错误和图片响应；缓存命中可跳过网络，因此没有日志不能单独证明请求配置有误。正文阅读和章节插图渲染留在后续阶段。
 
 ## 开源项目证据与界限
 

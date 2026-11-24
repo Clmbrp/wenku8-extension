@@ -50,6 +50,11 @@ internal class WenkuDiagnostics(
         log("result stage=$stage kind=$kind")
     }
 
+    fun hostFailure(error: IOException) {
+        val types = generateSequence<Throwable>(error) { it.cause }.take(4).joinToString(">") { it.javaClass.simpleName }
+        log("hostWebView exceptionTypes=$types")
+    }
+
     fun search(page: Int, kind: String, usedNextLink: Boolean) {
         log("search page=$page kind=$kind usedNextLink=$usedNextLink")
     }

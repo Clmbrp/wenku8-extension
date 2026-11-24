@@ -136,7 +136,7 @@ internal class WenkuPages(
     private val executeRequest: (suspend (Request) -> Response)? = null,
 ) {
     private val expectedUserAgent = headers["User-Agent"]
-    private val client = client.newBuilder()
+    private val pageClient = client.newBuilder()
         // Serve chapter recovery even when the reader's image dispatcher is full.
         .dispatcher(Dispatcher())
         .followRedirects(false)
@@ -154,7 +154,7 @@ internal class WenkuPages(
         }
         .build()
     private val htmlRecoveryClient = hostCloudflare?.let { host ->
-        client.newBuilder().apply {
+        pageClient.newBuilder().apply {
             interceptors().add(0, host)
             // The host may consume a challenge and throw IOException instead of returning it.
             interceptors().add(
@@ -170,7 +170,7 @@ internal class WenkuPages(
             )
         }.build()
     }
-    private val session = WenkuSession(client.cookieJar)
+    private val session = WenkuSession(pageClient.cookieJar)
 
     suspend fun get(path: String, retryOnRateLimit: Boolean = true, probe: Boolean = false): Document {
         val url = origin.resolve(path) ?: throw WenkuAccessException(AccessFailure.STRUCTURE, "页面地址无效")
@@ -329,7 +329,7 @@ internal class WenkuPages(
     private suspend fun <T> withResponse(request: Request, recoverChallenge: Boolean = false, read: (Response) -> T): T {
         executeRequest?.let { return it(request).use(read) }
         val recoveryClient = htmlRecoveryClient?.takeIf { recoverChallenge }
-        if (recoveryClient == null) return wenkuReadResponse(client.newCall(request), read, awaitCall)
+        if (recoveryClient == null) return wenkuReadResponse(pageClient.newCall(request), read, awaitCall)
 
         val attempt = ChallengeAttempt()
         val tagged = request.newBuilder().tag(ChallengeAttempt::class.java, attempt).build()
@@ -339,6 +339,7 @@ internal class WenkuPages(
             if (!attempt.challenged) throw error
             currentCoroutineContext().ensureActive()
             checkNetwork(request.url)
+            diagnostics?.hostFailure(error)
             diagnostics?.result("hostWebView", "NEEDS_MANUAL_VERIFICATION")
             WenkuErrors.challengeRequired()
         }

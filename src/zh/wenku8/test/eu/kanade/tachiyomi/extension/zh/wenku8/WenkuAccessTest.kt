@@ -23,6 +23,7 @@ import org.junit.Test
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 class WenkuAccessTest {
@@ -125,7 +126,7 @@ class WenkuAccessTest {
     fun `main site HTML can recover through the host and parse the retried response`() = runBlocking {
         val logs = mutableListOf<String>()
         var requests = 0
-        val upstream = OkHttpClient.Builder().addInterceptor { chain ->
+        val upstream = OkHttpClient.Builder().callTimeout(2, TimeUnit.MINUTES).addInterceptor { chain ->
             val url = chain.request().url
             if (++requests == 1) response(url, 403).newBuilder().header("cf-mitigated", "challenge").build()
             else response(url, 200, popular.encodeToByteArray())
@@ -138,7 +139,10 @@ class WenkuAccessTest {
         }
         val pages = WenkuPages(
             upstream, headersOf(), origin, WenkuDiagnostics { logs += it },
-            WenkuRequestPolicy(intervalMillis = 0), hostCloudflare = host, awaitCall = { it.execute() },
+            WenkuRequestPolicy(intervalMillis = 0), hostCloudflare = host, awaitCall = {
+                assertEquals(TimeUnit.SECONDS.toNanos(30), it.timeout().timeoutNanos())
+                it.execute()
+            },
         )
         assertNull(WenkuBrowse(pages, origin).checkWebsiteAccess())
         assertEquals(2, requests)
@@ -149,6 +153,7 @@ class WenkuAccessTest {
     @Test
     fun `host failure after a challenge prompts manual verification while a timeout remains a network error`() = runBlocking {
         val recovery = WenkuWebViewRecovery(origin)
+        val logs = mutableListOf<String>()
         var serverChallenged = true
         val upstream = OkHttpClient.Builder().addInterceptor { chain ->
             if (!serverChallenged) throw SocketTimeoutException()
@@ -156,14 +161,16 @@ class WenkuAccessTest {
         }.build()
         val host = Interceptor { chain ->
             chain.proceed(chain.request()).close()
-            throw IOException("host WebView could not finish the challenge")
+            throw IOException("synthetic-private-detail", IllegalStateException("synthetic-private-cause"))
         }
         val pages = WenkuPages(
-            upstream, headersOf(), origin, policy = WenkuRequestPolicy(intervalMillis = 0),
+            upstream, headersOf(), origin, WenkuDiagnostics { logs += it }, policy = WenkuRequestPolicy(intervalMillis = 0),
             hostCloudflare = host, recovery = recovery, awaitCall = { it.execute() },
         )
         val browse = WenkuBrowse(pages, origin)
         assertEquals(AccessFailure.CHALLENGE, browse.checkWebsiteAccess())
+        assertTrue(logs.any { it.startsWith("hostWebView exceptionTypes=IOException") && it.endsWith(">IllegalStateException") })
+        assertFalse(logs.any { "synthetic-private" in it })
         val target = origin.resolve(WenkuBrowse.rankingPath("allvisit", 1))
         assertEquals(target, recovery.entry())
         serverChallenged = false

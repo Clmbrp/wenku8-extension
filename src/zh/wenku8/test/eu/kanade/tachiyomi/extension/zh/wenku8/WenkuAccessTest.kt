@@ -3,9 +3,11 @@ package eu.kanade.tachiyomi.extension.zh.wenku8
 import kotlinx.coroutines.runBlocking
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.FormBody
 import okhttp3.Headers.Companion.headersOf
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -117,6 +119,89 @@ class WenkuAccessTest {
         assertEquals(AccessFailure.FORBIDDEN, browse.checkWebsiteAccess())
         assertTrue(paths.all { it.isHttps && it.encodedPath.endsWith("toplist.php") })
         assertEquals(0, cookies.writes)
+    }
+
+    @Test
+    fun `main site HTML can recover through the host and parse the retried response`() = runBlocking {
+        val logs = mutableListOf<String>()
+        var requests = 0
+        val upstream = OkHttpClient.Builder().addInterceptor { chain ->
+            val url = chain.request().url
+            if (++requests == 1) response(url, 403).newBuilder().header("cf-mitigated", "challenge").build()
+            else response(url, 200, popular.encodeToByteArray())
+        }.build()
+        val host = Interceptor { chain ->
+            val first = chain.proceed(chain.request())
+            assertEquals("challenge", first.header("cf-mitigated"))
+            first.close()
+            chain.proceed(chain.request())
+        }
+        val pages = WenkuPages(
+            upstream, headersOf(), origin, WenkuDiagnostics { logs += it },
+            WenkuRequestPolicy(intervalMillis = 0), hostCloudflare = host, awaitCall = { it.execute() },
+        )
+        assertNull(WenkuBrowse(pages, origin).checkWebsiteAccess())
+        assertEquals(2, requests)
+        assertTrue("result stage=hostWebView kind=CHALLENGE_RECEIVED" in logs)
+        assertTrue(logs.any { "status=200 challengeHeader=false" in it })
+    }
+
+    @Test
+    fun `host failure after a challenge prompts manual verification while a timeout remains a network error`() = runBlocking {
+        var serverChallenged = true
+        val upstream = OkHttpClient.Builder().addInterceptor { chain ->
+            if (!serverChallenged) throw SocketTimeoutException()
+            response(chain.request().url, 403).newBuilder().header("cf-mitigated", "challenge").build()
+        }.build()
+        val host = Interceptor { chain ->
+            chain.proceed(chain.request()).close()
+            throw IOException("host WebView could not finish the challenge")
+        }
+        val pages = WenkuPages(
+            upstream, headersOf(), origin, policy = WenkuRequestPolicy(intervalMillis = 0),
+            hostCloudflare = host, awaitCall = { it.execute() },
+        )
+        val browse = WenkuBrowse(pages, origin)
+        assertEquals(AccessFailure.CHALLENGE, browse.checkWebsiteAccess())
+        serverChallenged = false
+        assertEquals(AccessFailure.NETWORK, browse.checkWebsiteAccess())
+    }
+
+    @Test
+    fun `host handling stays off search submissions and images and respects rate limit cooldown`() = runBlocking {
+        val starts = mutableListOf<Long>()
+        val time = AtomicLong()
+        val upstream = OkHttpClient.Builder().addInterceptor { chain ->
+            val url = chain.request().url
+            starts += time.get()
+            when (starts.size) {
+                1, 2 -> response(url, 403).newBuilder().header("cf-mitigated", "challenge").build()
+                3 -> response(url, 429).newBuilder().header("Retry-After", "7").build()
+                else -> response(url, 200, popular.encodeToByteArray())
+            }
+        }.build()
+        var hostCalls = 0
+        val host = Interceptor { chain ->
+            hostCalls++
+            chain.proceed(chain.request())
+        }
+        val policy = WenkuRequestPolicy(intervalMillis = 0, monotonicMillis = time::get, pause = { time.addAndGet(it) })
+        val pages = WenkuPages(upstream, headersOf(), origin, policy = policy, hostCloudflare = host, awaitCall = { it.execute() })
+        val search = assertThrows(WenkuAccessException::class.java) {
+            runBlocking { pages.searchForm("样本", FormBody.Builder().add("searchkey", "样本").build()) }
+        }
+        val image = assertThrows(WenkuAccessException::class.java) {
+            runBlocking { pages.illustration(Request.Builder().url(origin.resolve("/example.jpg")!!).build()) { it.code } }
+        }
+        assertEquals(AccessFailure.CHALLENGE, search.failure)
+        assertEquals(AccessFailure.CHALLENGE, image.failure)
+        assertEquals(0, hostCalls)
+        val browse = WenkuBrowse(pages, origin)
+        repeat(2) { assertEquals(AccessFailure.RATE_LIMITED, browse.checkWebsiteAccess()) }
+        assertEquals(1, hostCalls)
+        assertEquals("样本书", browse.popular(1).books.single().title)
+        assertEquals(2, hostCalls)
+        assertEquals(listOf(0L, 0L, 0L, 7_000L), starts)
     }
 
     @Test

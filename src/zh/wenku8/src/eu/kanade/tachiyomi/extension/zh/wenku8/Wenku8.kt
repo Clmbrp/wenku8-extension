@@ -22,6 +22,7 @@ import java.io.File
 
 private const val WEBVIEW_ENTRY = "wenku8_webview_entry"
 private const val VALIDATION_ENTRY = "security"
+private const val HOST_CLOUDFLARE = "eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor"
 
 internal fun wenkuWebViewPath(mode: String?): String = if (mode == VALIDATION_ENTRY) WenkuBrowse.rankingPath("allvisit", 1) else "/login.php"
 
@@ -44,8 +45,8 @@ abstract class Wenku8 :
                 entries = arrayOf("账号登录（HTTPS）", "站点安全验证（HTTPS 榜单）")
                 entryValues = arrayOf("login", VALIDATION_ENTRY)
                 setDefaultValue("login")
-                summary = "%s\n站点安全验证会打开热门榜。若直接显示书目，说明当前 WebView 可访问。" +
-                    "仅在站点显示验证时手动完成。返回后可检查插件访问状态；仅在提示需要登录时切回账号登录。若出现 HTTP 登录页，请关闭页面，勿输入账号密码。"
+                summary = "%s\nMihon 会尝试处理支持自动完成的验证。若仍提示验证，打开站点安全验证并在网页提示时手动完成。" +
+                    "若网页直接显示书目，保持登录并返回重试。仅在提示需要登录时切回账号登录。若出现 HTTP 登录页，请关闭页面，勿输入账号密码。"
             },
         )
         website(wenkuWebsiteCheckPreference(screen.context) { browse.checkWebsiteAccess() })
@@ -63,13 +64,14 @@ abstract class Wenku8 :
         null
     }
 
-    // The host's Cloudflare interceptor may start an automated background WebView. This source
-    // only allows user-initiated interaction in the host WebView. Preserve the host cookie jar.
+    private val hostCloudflare = super.client.interceptors.find { it.javaClass.name == HOST_CLOUDFLARE }
+
+    // Keep the host's WebView handler on the paced main-site HTML client, away from image hosts.
     override val client = super.client.newBuilder().apply {
         interceptors().add(0) { chain ->
             if (chain.request().url.host == WenkuPageRef.HOST) reader.intercept(chain) else chain.proceed(chain.request())
         }
-        interceptors().removeAll { it.javaClass.name == "eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor" }
+        hostCloudflare?.let { interceptors().remove(it) }
         interceptors().removeAll { it.javaClass.name == "okhttp3.logging.HttpLoggingInterceptor" }
         networkInterceptors().removeAll { it.javaClass.name == "okhttp3.logging.HttpLoggingInterceptor" }
         diagnostics?.let { addInterceptor(it::cover) }
@@ -80,7 +82,7 @@ abstract class Wenku8 :
             runCatching {
                 applicationContext.getSystemService(ConnectivityManager::class.java)?.let { it.activeNetwork != null }
             }.getOrNull()
-        })
+        }, hostCloudflare = hostCloudflare)
     }
     private val browse by lazy { WenkuBrowse(pages, baseUrl.siteUrl(), diagnostics) }
     private val reader: WenkuReader by lazy {

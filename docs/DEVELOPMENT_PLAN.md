@@ -88,6 +88,9 @@
 - 80 项单元测试全部通过，Debug 构建及签名校验通过。回放了本地保存的真实文字章和六图插图章，混排顺序使用合成样本。APK 位于 `src/zh/wenku8/build/outputs/apk/debug/tachiyomi-zh.wenku8-v1.6.15.apk`。
 - 1.6.16 保留 5.2 缓存优化，为字号标签补上 px 数值。网站访问增加手动检查，区分无网络、网络连接失败、账号登录、Cloudflare 挑战、403、限流和其他错误。验证入口与检查均使用实际热门榜首屏。真机测试先检查在线状态，再于飞行模式及恢复网络后分别检查。复现后可只读取 `Wenku8Access` 调试日志。完整下载仍按 5.2 的飞行模式流程验收。
 - 1.6.16 的 86 项单元测试、Debug 构建与 APK 签名校验通过。自动测试验证模拟断网和重连、会话分类、共享退避、缓存重开及模拟 CBZ 回归。真机重连时 Cookie 是否发送与服务器是否接受仍待核对。APK 位于 `src/zh/wenku8/build/outputs/apk/debug/tachiyomi-zh.wenku8-v1.6.16.apk`。
+- 1.6.17 为 Wenku8 主站 HTML GET 启用 Mihon 内置的 Cloudflare 拦截器。匹配到站点挑战时，由 Mihon 尝试更新通行 Cookie 并重试。需要人工交互或自动处理失败时，来源继续提供手动 WebView 入口。搜索表单、封面和插图沿用各自的请求链。普通主站请求和最终 429 响应仍走既有节流和冷却机制。
+- 1.6.17 的 89 项单元测试、Debug 构建及 APK 签名校验通过。新增模拟测试覆盖宿主重试后解析榜单、挑战处理失败后的提示、网络超时、请求范围和 429 冷却。真实 WebView 能否完成重连时的挑战仍待验收。APK 位于 `src/zh/wenku8/build/outputs/apk/debug/tachiyomi-zh.wenku8-v1.6.17.apk`。
+- 真机复测时保持账号登录，确认热门榜可访问，开启再关闭飞行模式，联网后刷新一次。若仍出现安全验证提示，在当前登录状态打开来源 WebView。Debug 的 `Wenku8Access` 会记录收到挑战及需要人工处理的状态，可与最终 HTTP 响应对照。
 
 ## 后续阶段
 

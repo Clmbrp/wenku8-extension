@@ -255,7 +255,7 @@ internal fun wenkuWebsiteMessage(failure: AccessFailure?): String = when (failur
     AccessFailure.OFFLINE -> "设备未连接网络。恢复联网后再检查。"
     AccessFailure.NETWORK -> "连接网站失败。请检查网络、DNS 或代理，然后重试。"
     AccessFailure.LOGIN_REQUIRED, AccessFailure.SESSION_EXPIRED -> "网站要求账号登录。切换到「账号登录」，从 HTTPS 登录页登录。"
-    AccessFailure.CHALLENGE -> "网站要求 Cloudflare 安全验证。切换到「站点安全验证」，在来源 WebView 手动处理站点显示的挑战，保留现有账号登录。"
+    AccessFailure.CHALLENGE -> "网站仍要求 Cloudflare 安全验证。打开「站点安全验证」，保留现有账号登录。若网页直接显示书目，返回来源页重试。"
     AccessFailure.RATE_LIMITED -> "网站访问频繁，正在限流。请稍后手动重试。"
     AccessFailure.CLOUDFLARE_BLOCK -> "Cloudflare 拒绝插件的请求。可在来源 WebView 确认网页是否可访问。"
     AccessFailure.FORBIDDEN -> "网站拒绝访问（403）。可在来源 WebView 确认网页是否可访问。"

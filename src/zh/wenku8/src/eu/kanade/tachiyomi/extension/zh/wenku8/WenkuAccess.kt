@@ -15,6 +15,7 @@ import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -73,12 +74,15 @@ internal object WenkuErrors {
     }
 
     fun checkStatus(code: Int, challenge: Boolean) {
-        if (challenge) {
-            throw WenkuAccessException(AccessFailure.CHALLENGE, "网站要求安全验证。请在来源设置切换到「站点安全验证」，打开来源 WebView 手动处理。")
-        }
+        if (challenge) challengeRequired()
         if (code == 403) throw WenkuAccessException(AccessFailure.FORBIDDEN, "网站拒绝访问（403）；请检查站点限制或在 WebView 中查看")
         if (code !in 200..299) throw WenkuAccessException(AccessFailure.HTTP, "网站返回 HTTP $code")
     }
+
+    fun challengeRequired(): Nothing = throw WenkuAccessException(
+        AccessFailure.CHALLENGE,
+        "网站仍要求安全验证。请从「站点安全验证」打开来源 WebView，保持登录并按网页提示操作。",
+    )
 
     fun isChallenge(document: Document): Boolean = CHALLENGE_TITLE.matches(document.title()) ||
         document.selectFirst("#challenge-form, #cf-challenge-running, .cf-challenge") != null
@@ -126,6 +130,8 @@ internal class WenkuPages(
     private val diagnostics: WenkuDiagnostics? = null,
     private val policy: WenkuRequestPolicy = WenkuRequestPolicy(),
     private val hasNetwork: () -> Boolean? = { null },
+    hostCloudflare: Interceptor? = null,
+    private val awaitCall: suspend (Call) -> Response = { it.await() },
     private val executeRequest: (suspend (Request) -> Response)? = null,
 ) {
     private val expectedUserAgent = headers["User-Agent"]
@@ -146,6 +152,23 @@ internal class WenkuPages(
             }
         }
         .build()
+    private val htmlRecoveryClient = hostCloudflare?.let { host ->
+        client.newBuilder().apply {
+            interceptors().add(0, host)
+            // The host may consume a challenge and throw IOException instead of returning it.
+            interceptors().add(
+                1,
+                Interceptor { chain ->
+                    val request = chain.request()
+                    chain.proceed(request).also { response ->
+                        val challenged = response.header("cf-mitigated").equals("challenge", ignoreCase = true)
+                        request.tag(ChallengeAttempt::class.java)?.challenged = challenged
+                        if (challenged) diagnostics?.result("hostWebView", "CHALLENGE_RECEIVED")
+                    }
+                },
+            )
+        }.build()
+    }
     private val session = WenkuSession(client.cookieJar)
 
     suspend fun get(path: String, retryOnRateLimit: Boolean = true): Document {
@@ -204,7 +227,7 @@ internal class WenkuPages(
                     } else {
                         request.post(currentBody)
                     }
-                    withResponse(request.build()) { response ->
+                    withResponse(request.build(), recoverChallenge = currentBody == null) { response ->
                         val challengeHeader = response.header("cf-mitigated")?.equals("challenge", true) == true
                         diagnostics?.response(url, response.code, challengeHeader)
                         stage = "response"
@@ -291,9 +314,26 @@ internal class WenkuPages(
         throw WenkuAccessException(AccessFailure.OFFLINE, "设备未连接网络，联网后可以重试")
     }
 
-    private suspend fun <T> withResponse(request: Request, read: (Response) -> T): T {
+    private suspend fun <T> withResponse(request: Request, recoverChallenge: Boolean = false, read: (Response) -> T): T {
         executeRequest?.let { return it(request).use(read) }
-        return wenkuReadResponse(client.newCall(request), read)
+        val recoveryClient = htmlRecoveryClient?.takeIf { recoverChallenge }
+        if (recoveryClient == null) return wenkuReadResponse(client.newCall(request), read, awaitCall)
+
+        val attempt = ChallengeAttempt()
+        val tagged = request.newBuilder().tag(ChallengeAttempt::class.java, attempt).build()
+        try {
+            return wenkuReadResponse(recoveryClient.newCall(tagged), read, awaitCall)
+        } catch (error: IOException) {
+            if (!attempt.challenged) throw error
+            currentCoroutineContext().ensureActive()
+            checkNetwork(request.url)
+            diagnostics?.result("hostWebView", "NEEDS_MANUAL_VERIFICATION")
+            WenkuErrors.challengeRequired()
+        }
+    }
+
+    private class ChallengeAttempt {
+        @Volatile var challenged = false
     }
 
     companion object {
@@ -301,7 +341,7 @@ internal class WenkuPages(
     }
 }
 
-internal suspend fun <T> wenkuReadResponse(call: Call, read: (Response) -> T): T = coroutineScope {
+internal suspend fun <T> wenkuReadResponse(call: Call, read: (Response) -> T, awaitCall: suspend (Call) -> Response = { it.await() }): T = coroutineScope {
     val finished = AtomicBoolean()
     // The host await() cancels up to response delivery. Keep cancellation active while reading the body.
     val cancelCall = launch(start = CoroutineStart.UNDISPATCHED) {
@@ -312,7 +352,7 @@ internal suspend fun <T> wenkuReadResponse(call: Call, read: (Response) -> T): T
         }
     }
     try {
-        call.await().use(read)
+        awaitCall(call).use(read)
     } finally {
         finished.set(true)
         cancelCall.cancel()

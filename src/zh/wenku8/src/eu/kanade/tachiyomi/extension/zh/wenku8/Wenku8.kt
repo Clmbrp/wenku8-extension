@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.extension.zh.wenku8
 import android.net.ConnectivityManager
 import android.util.Log
 import android.webkit.CookieManager
-import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.extension.BuildConfig
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -20,11 +19,7 @@ import keiyoushi.utils.getPreferencesLazy
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.File
 
-private const val WEBVIEW_ENTRY = "wenku8_webview_entry"
-private const val VALIDATION_ENTRY = "security"
 private const val HOST_CLOUDFLARE = "eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor"
-
-internal fun wenkuWebViewPath(mode: String?): String = if (mode == VALIDATION_ENTRY) WenkuBrowse.rankingPath("allvisit", 1) else "/login.php"
 
 @Source
 abstract class Wenku8 :
@@ -33,23 +28,20 @@ abstract class Wenku8 :
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
+    private val webViewRecovery by lazy { WenkuWebViewRecovery(baseUrl.siteUrl()) }
 
-    override fun getHomeUrl(): String = baseUrl + wenkuWebViewPath(preferences.getString(WEBVIEW_ENTRY, null))
+    // The old wenku8_webview_entry preference no longer controls navigation.
+    override fun getHomeUrl(): String = webViewRecovery.entry().toString()
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        wenkuRemoveLegacyWebViewPreference(preferences)
         val website = wenkuPreferenceGroup(screen, "网站访问")
+        website(wenkuWebsiteLoginPreference(screen.context, webViewRecovery::prepareLogin))
         website(
-            ListPreference(screen.context).apply {
-                key = WEBVIEW_ENTRY
-                title = "来源 WebView 打开页面"
-                entries = arrayOf("账号登录（HTTPS）", "站点安全验证（HTTPS 榜单）")
-                entryValues = arrayOf("login", VALIDATION_ENTRY)
-                setDefaultValue("login")
-                summary = "%s\nMihon 会尝试处理支持自动完成的验证。若仍提示验证，打开站点安全验证并在网页提示时手动完成。" +
-                    "若网页直接显示书目，保持登录并返回重试。仅在提示需要登录时切回账号登录。若出现 HTTP 登录页，请关闭页面，勿输入账号密码。"
+            wenkuWebsiteCheckPreference(screen.context) {
+                wenkuWebsiteMessage(browse.checkWebsiteAccess(), webViewRecovery.hasPending())
             },
         )
-        website(wenkuWebsiteCheckPreference(screen.context) { browse.checkWebsiteAccess() })
         wenkuReadingPreferences(screen, preferences) { reader.refreshPageLists(applicationContext.cacheDir) }
     }
 
@@ -82,7 +74,7 @@ abstract class Wenku8 :
             runCatching {
                 applicationContext.getSystemService(ConnectivityManager::class.java)?.let { it.activeNetwork != null }
             }.getOrNull()
-        }, hostCloudflare = hostCloudflare)
+        }, hostCloudflare = hostCloudflare, recovery = webViewRecovery)
     }
     private val browse by lazy { WenkuBrowse(pages, baseUrl.siteUrl(), diagnostics) }
     private val reader: WenkuReader by lazy {

@@ -71,7 +71,7 @@ class WenkuAccessTest {
         assertEquals(0, cookies.writes)
         assertTrue("transport from=OFFLINE to=HTTP" in logs)
         assertTrue(logs.any { "siteLogin=SIGNED_IN" in it })
-        assertEquals("网站当前访问正常，无需重新验证。", wenkuWebsiteMessage(null))
+        assertEquals("热门榜可访问。", wenkuWebsiteMessage(null))
     }
 
     @Test
@@ -148,6 +148,7 @@ class WenkuAccessTest {
 
     @Test
     fun `host failure after a challenge prompts manual verification while a timeout remains a network error`() = runBlocking {
+        val recovery = WenkuWebViewRecovery(origin)
         var serverChallenged = true
         val upstream = OkHttpClient.Builder().addInterceptor { chain ->
             if (!serverChallenged) throw SocketTimeoutException()
@@ -159,12 +160,15 @@ class WenkuAccessTest {
         }
         val pages = WenkuPages(
             upstream, headersOf(), origin, policy = WenkuRequestPolicy(intervalMillis = 0),
-            hostCloudflare = host, awaitCall = { it.execute() },
+            hostCloudflare = host, recovery = recovery, awaitCall = { it.execute() },
         )
         val browse = WenkuBrowse(pages, origin)
         assertEquals(AccessFailure.CHALLENGE, browse.checkWebsiteAccess())
+        val target = origin.resolve(WenkuBrowse.rankingPath("allvisit", 1))
+        assertEquals(target, recovery.entry())
         serverChallenged = false
         assertEquals(AccessFailure.NETWORK, browse.checkWebsiteAccess())
+        assertEquals(target, recovery.entry())
     }
 
     @Test

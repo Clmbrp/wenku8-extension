@@ -11,13 +11,6 @@ class WenkuParserTest {
     private val origin = "https://www.wenku8.net/".toHttpUrl()
 
     @Test
-    fun `webview defaults to secure login and can open secure ranking`() {
-        assertEquals("https://www.wenku8.net/login.php", origin.resolve(wenkuWebViewPath(null)).toString())
-        assertEquals("https://www.wenku8.net/login.php", origin.resolve(wenkuWebViewPath("http://example.org")).toString())
-        assertEquals("https://www.wenku8.net/modules/article/toplist.php?sort=allvisit&page=1", origin.resolve(wenkuWebViewPath("security")).toString())
-    }
-
-    @Test
     fun `detail resolves only the book's catalog and normalizes the site's cover to HTTPS`() {
         val doc = Jsoup.parse(
             """<div id="content"><table><tr><td><span><b>示例小说</b></span></td></tr>

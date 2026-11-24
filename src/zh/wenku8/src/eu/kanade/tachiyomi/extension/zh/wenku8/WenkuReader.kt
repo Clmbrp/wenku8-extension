@@ -176,6 +176,7 @@ internal class WenkuReader(
         currentCoroutineContext().ensureActive()
         val content = WenkuChapterParser.parse(document)
         currentCoroutineContext().ensureActive()
+        pages.confirmChapter(document)
         return cache.remember(path, content)
     }
 

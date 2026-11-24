@@ -232,7 +232,25 @@ private data class ReadingPreference(val reset: () -> Unit, val sync: () -> Unit
 
 internal fun wenkuFontSizeLabels(sizes: List<Int>): List<String> = listOf("小号", "标准", "大号").zip(sizes) { label, size -> "$label · $size px" }
 
-internal fun wenkuWebsiteCheckPreference(context: Context, checkAccess: suspend () -> AccessFailure?): Preference = plainPreference(context).apply {
+internal fun wenkuRemoveLegacyWebViewPreference(preferences: SharedPreferences) {
+    val key = "wenku8_webview_entry"
+    if (preferences.contains(key)) preferences.edit().remove(key).apply()
+}
+
+internal fun wenkuWebsiteLoginPreference(context: Context, prepareLogin: () -> Boolean): Preference = plainPreference(context).apply {
+    title = "首次登录网站（HTTPS）"
+    summary = "网站要求登录时会自动选中登录入口。若要提前登录，可点这里准备登录页。"
+    setOnPreferenceClickListener {
+        summary = if (prepareLogin()) {
+            "$WENKU_WEBVIEW_ACTION，确认地址是 HTTPS 后登录。"
+        } else {
+            "来源 WebView 已指向待处理的页面。请先打开并处理该页面。"
+        }
+        true
+    }
+}
+
+internal fun wenkuWebsiteCheckPreference(context: Context, checkAccess: suspend () -> String): Preference = plainPreference(context).apply {
     title = "检查网站访问状态"
     summary = "使用插件的正常网络请求检查热门榜。"
     setOnPreferenceClickListener {
@@ -240,7 +258,7 @@ internal fun wenkuWebsiteCheckPreference(context: Context, checkAccess: suspend 
         summary = "正在检查网站访问…"
         CoroutineScope(Dispatchers.Main).launch {
             try {
-                summary = withTimeoutOrNull(35_000) { wenkuWebsiteMessage(checkAccess()) }
+                summary = withTimeoutOrNull(35_000) { checkAccess() }
                     ?: "本次检查超时。请稍后手动重试。"
             } finally {
                 setEnabled(true)
@@ -250,12 +268,12 @@ internal fun wenkuWebsiteCheckPreference(context: Context, checkAccess: suspend 
     }
 }
 
-internal fun wenkuWebsiteMessage(failure: AccessFailure?): String = when (failure) {
-    null -> "网站当前访问正常，无需重新验证。"
+internal fun wenkuWebsiteMessage(failure: AccessFailure?, hasPending: Boolean = false): String = when (failure) {
+    null -> if (hasPending) "热门榜可访问。来源 WebView 仍保留待处理的入口。" else "热门榜可访问。"
     AccessFailure.OFFLINE -> "设备未连接网络。恢复联网后再检查。"
     AccessFailure.NETWORK -> "连接网站失败。请检查网络、DNS 或代理，然后重试。"
-    AccessFailure.LOGIN_REQUIRED, AccessFailure.SESSION_EXPIRED -> "网站要求账号登录。切换到「账号登录」，从 HTTPS 登录页登录。"
-    AccessFailure.CHALLENGE -> "网站仍要求 Cloudflare 安全验证。打开「站点安全验证」，保留现有账号登录。若网页直接显示书目，返回来源页重试。"
+    AccessFailure.LOGIN_REQUIRED, AccessFailure.SESSION_EXPIRED -> "热门榜要求登录。$WENKU_WEBVIEW_ACTION，按页面提示操作。请使用 HTTPS 登录页。"
+    AccessFailure.CHALLENGE -> "热门榜请求需要安全验证。$WENKU_WEBVIEW_ACTION，保留现有账号登录。若网页可访问，返回原页面重试。"
     AccessFailure.RATE_LIMITED -> "网站访问频繁，正在限流。请稍后手动重试。"
     AccessFailure.CLOUDFLARE_BLOCK -> "Cloudflare 拒绝插件的请求。可在来源 WebView 确认网页是否可访问。"
     AccessFailure.FORBIDDEN -> "网站拒绝访问（403）。可在来源 WebView 确认网页是否可访问。"

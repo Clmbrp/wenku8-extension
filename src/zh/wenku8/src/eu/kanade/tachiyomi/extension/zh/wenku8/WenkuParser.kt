@@ -122,6 +122,6 @@ internal object WenkuParser {
     private fun structure(message: String): Nothing = throw WenkuAccessException(AccessFailure.STRUCTURE, message)
 
     val BOOK_PATH = Regex("/book/(\\d+)\\.htm")
-    private val CATALOG_PATH = Regex("/novel/(\\d+)/(\\d+)/index\\.htm")
+    val CATALOG_PATH = Regex("/novel/(\\d+)/(\\d+)/index\\.htm")
     private val CHAPTER_FILE = Regex("\\d+\\.htm")
 }

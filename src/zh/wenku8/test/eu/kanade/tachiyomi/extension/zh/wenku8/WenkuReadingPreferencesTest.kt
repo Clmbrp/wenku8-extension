@@ -1,11 +1,47 @@
 package eu.kanade.tachiyomi.extension.zh.wenku8
 
+import android.content.SharedPreferences
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import java.lang.reflect.Proxy
 import java.util.Locale
 
 class WenkuReadingPreferencesTest {
+    @Test
+    fun `upgrading either old WebView choice leaves the homepage and preserves reading settings`() {
+        val home = "https://www.wenku8.net/".toHttpUrl()
+        for (oldChoice in listOf("login", "security")) {
+            val saved = mutableMapOf("wenku8_webview_entry" to oldChoice, "wenku8_reader_body_size" to "65")
+            val recovery = WenkuWebViewRecovery(home)
+            assertEquals(home, recovery.entry()) // The source works before opening settings too.
+            val editor = Proxy.newProxyInstance(
+                SharedPreferences.Editor::class.java.classLoader,
+                arrayOf(SharedPreferences.Editor::class.java),
+            ) { proxy, method, args ->
+                when (method.name) {
+                    "remove" -> proxy.also { saved.remove(args.single() as String) }
+                    "apply" -> null
+                    else -> error(method.name)
+                }
+            }
+            val prefs = Proxy.newProxyInstance(
+                SharedPreferences::class.java.classLoader,
+                arrayOf(SharedPreferences::class.java),
+            ) { _, method, args ->
+                when (method.name) {
+                    "contains" -> saved.containsKey(args.single() as String)
+                    "edit" -> editor
+                    else -> error(method.name)
+                }
+            } as SharedPreferences
+            wenkuRemoveLegacyWebViewPreference(prefs)
+            assertEquals(mapOf("wenku8_reader_body_size" to "65"), saved)
+            assertEquals(home, recovery.entry())
+        }
+    }
+
     @Test
     fun `three font presets and one custom option preserve old body and heading values`() {
         assertEquals(listOf("小号 · 34 px", "标准 · 42 px", "大号 · 56 px"), wenkuFontSizeLabels(WenkuReadingStyle.BODY_SIZES))

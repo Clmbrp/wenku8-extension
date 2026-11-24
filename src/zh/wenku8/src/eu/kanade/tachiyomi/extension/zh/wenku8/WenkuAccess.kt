@@ -66,9 +66,9 @@ internal object WenkuErrors {
     fun loginRequired(hadLoginCookie: Boolean): Nothing {
         val kind = if (hadLoginCookie) AccessFailure.SESSION_EXPIRED else AccessFailure.LOGIN_REQUIRED
         val message = if (hadLoginCookie) {
-            "站点仍要求登录，会话可能已失效。请使用来源 WebView 的 HTTPS 账号登录入口。"
+            "网站要求重新登录。$WENKU_WEBVIEW_ACTION，使用 HTTPS 登录页，随后回原页面重试。"
         } else {
-            "站点要求登录，请使用来源 WebView 的 HTTPS 账号登录入口。"
+            "网站要求登录。$WENKU_WEBVIEW_ACTION，使用 HTTPS 登录页，随后回原页面重试。"
         }
         throw WenkuAccessException(kind, message)
     }
@@ -81,7 +81,7 @@ internal object WenkuErrors {
 
     fun challengeRequired(): Nothing = throw WenkuAccessException(
         AccessFailure.CHALLENGE,
-        "网站仍要求安全验证。请从「站点安全验证」打开来源 WebView，保持登录并按网页提示操作。",
+        "网站需要安全验证。$WENKU_WEBVIEW_ACTION，按网页提示完成后回原章节或页面重试。请保留登录。",
     )
 
     fun isChallenge(document: Document): Boolean = CHALLENGE_TITLE.matches(document.title()) ||
@@ -131,6 +131,7 @@ internal class WenkuPages(
     private val policy: WenkuRequestPolicy = WenkuRequestPolicy(),
     private val hasNetwork: () -> Boolean? = { null },
     hostCloudflare: Interceptor? = null,
+    private val recovery: WenkuWebViewRecovery? = null,
     private val awaitCall: suspend (Call) -> Response = { it.await() },
     private val executeRequest: (suspend (Request) -> Response)? = null,
 ) {
@@ -171,14 +172,14 @@ internal class WenkuPages(
     }
     private val session = WenkuSession(client.cookieJar)
 
-    suspend fun get(path: String, retryOnRateLimit: Boolean = true): Document {
+    suspend fun get(path: String, retryOnRateLimit: Boolean = true, probe: Boolean = false): Document {
         val url = origin.resolve(path) ?: throw WenkuAccessException(AccessFailure.STRUCTURE, "页面地址无效")
         checkNetwork(url)
         if (!retryOnRateLimit && policy.isCoolingDown()) {
             diagnostics?.result("throttle", AccessFailure.RATE_LIMITED.name)
             throw WenkuAccessException(AccessFailure.RATE_LIMITED, "网站正在限流，请稍后再检查")
         }
-        return policy.page(url, null, retryOnRateLimit) { load(url, retryOnRateLimit = retryOnRateLimit) }
+        return policy.page(url, null, retryOnRateLimit) { load(url, retryOnRateLimit = retryOnRateLimit, probe = probe) }
     }
 
     suspend fun searchForm(keyword: String, body: RequestBody): Document {
@@ -202,7 +203,13 @@ internal class WenkuPages(
         }
     }
 
-    private suspend fun load(start: HttpUrl, form: RequestBody? = null, retryOnRateLimit: Boolean = true): Document {
+    fun confirmChapter(document: Document) {
+        val url = document.location().toHttpUrlOrNull() ?: return
+        recovery?.succeeded(url, url, probe = false, signedIn = WenkuErrors.showsSignedIn(document, origin))
+    }
+
+    private suspend fun load(start: HttpUrl, form: RequestBody? = null, retryOnRateLimit: Boolean = true, probe: Boolean = false): Document {
+        val context = currentCoroutineContext()
         var url = start
         var body = form
         var stage = "redirect"
@@ -276,7 +283,10 @@ internal class WenkuPages(
                         if (response.isSuccessful) WenkuErrors.checkPage(document, hadLoginCookie)
                         if (WenkuErrors.isRateLimitNotice(document)) policy.limited(response.header("Retry-After"), response.header("Date"))
                         WenkuErrors.checkStatus(response.code, false)
-                        diagnostics?.acceptedHtml(WenkuErrors.showsSignedIn(document, origin))
+                        context.ensureActive()
+                        val signedIn = WenkuErrors.showsSignedIn(document, origin)
+                        diagnostics?.acceptedHtml(signedIn)
+                        if (!WENKU_CHAPTER_PATH.matches(start.encodedPath)) recovery?.succeeded(start, url, probe, signedIn)
                         document
                     }
                 }
@@ -286,7 +296,7 @@ internal class WenkuPages(
             currentCoroutineContext().ensureActive()
             checkNetwork(url)
             diagnostics?.transport(
-                when (e) {
+                when (if (e.javaClass == IOException::class.java) e.cause ?: e else e) {
                     is UnknownHostException -> "DNS"
                     is SocketTimeoutException -> "TIMEOUT"
                     is ConnectException -> "CONNECT"
@@ -297,6 +307,8 @@ internal class WenkuPages(
             diagnostics?.result(stage, AccessFailure.NETWORK.name)
             throw WenkuAccessException(AccessFailure.NETWORK, "网络连接失败或超时，请检查网络后重试")
         } catch (e: WenkuAccessException) {
+            context.ensureActive()
+            recovery?.failed(start, url, e.failure, probe)
             diagnostics?.result(stage, e.failure.name)
             throw e
         }

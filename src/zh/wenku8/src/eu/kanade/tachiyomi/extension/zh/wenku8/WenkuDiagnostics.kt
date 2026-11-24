@@ -7,21 +7,39 @@ import okhttp3.Response
 import java.io.IOException
 
 /** Redacted trace. The source only enables this in Debug builds. */
-internal class WenkuDiagnostics(private val log: (String) -> Unit) {
-    fun session(url: HttpUrl, hasLoginCookie: Boolean) {
-        log("session url=${url.forTrace()} loginCookieVisible=$hasLoginCookie")
+internal class WenkuDiagnostics(
+    private val webViewCookies: ((HttpUrl) -> Set<String>?)? = null,
+    private val log: (String) -> Unit,
+) {
+    private var lastTransport: String? = null
+
+    fun session(url: HttpUrl, names: Set<String>) {
+        val webView = webViewCookies?.invoke(url)
+        val agreement = webView?.let { it == names }
+        log("session url=${url.forTrace()} jarNames=${names.forTrace()} webViewNames=${webView?.forTrace() ?: "unknown"} cookieNamesMatch=$agreement")
     }
 
     // A network interceptor sees the request after OkHttp has applied its CookieJar.
-    fun sent(request: Request) {
-        val hasLoginCookie = request.headers("Cookie").any { header ->
-            header.split(';').any { it.substringBefore('=', "").trim() == WenkuSession.LOGIN_COOKIE }
-        }
-        log("request url=${request.url.forTrace()} loginCookieSent=$hasLoginCookie")
+    fun sent(request: Request, expectedUserAgent: String? = null) {
+        val names = WenkuSession.cookieNamesFromHeaders(request.headers("Cookie"))
+        val userAgentMatches = expectedUserAgent?.let { it == request.header("User-Agent") }
+        log("request url=${request.url.forTrace()} sentNames=${names.forTrace()} sourceUserAgentMatches=$userAgentMatches")
     }
 
     fun response(url: HttpUrl, status: Int, challengeHeader: Boolean) {
+        transport("HTTP")
         log("response url=${url.forTrace()} status=$status challengeHeader=$challengeHeader")
+    }
+
+    @Synchronized
+    fun transport(state: String) {
+        if (state == lastTransport) return
+        log("transport from=${lastTransport ?: "UNKNOWN"} to=$state")
+        lastTransport = state
+    }
+
+    fun acceptedHtml(showsSignedIn: Boolean) {
+        log("result stage=page kind=HTML siteLogin=${if (showsSignedIn) "SIGNED_IN" else "UNCONFIRMED"}")
     }
 
     fun redirect(url: HttpUrl) {
@@ -60,6 +78,8 @@ internal class WenkuDiagnostics(private val log: (String) -> Unit) {
         val safePath = if (knownHost && encodedPath in SAFE_PATHS) encodedPath else "/<redacted>"
         return "$scheme://$safeHost$safePath"
     }
+
+    private fun Set<String>.forTrace(): String = sorted().joinToString(separator = ",").ifEmpty { "none" }
 
     companion object {
         const val TAG = "Wenku8Access"

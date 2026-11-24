@@ -193,6 +193,20 @@ class WenkuDownloadTest {
         assertEquals(2, fixture.htmlCalls)
     }
 
+    @Test
+    fun `fresh cached text can reopen with no active network and uncached HTML stops before transport`() = runBlocking {
+        val fixture = fixture(temporary.newFolder(), "<p>第一段。</p><p>第二段。</p>") { error("no illustrations") }
+        val original = fixture.reader().pageUrls(chapterPath)
+        fixture.online = false
+        val reopened = fixture.reader()
+        val offline = wenkuMihonPages(reopened.pageUrls(chapterPath))
+        assertEquals(original, offline.map(Page::url))
+        assertEquals(listOf(FIRST_TEXT, SECOND_TEXT), offline.map { pngColor(getPng(client(reopened), it)) })
+        val error = runCatching { reopened.pageUrls("/novel/0/42/102.htm") }.exceptionOrNull() as WenkuAccessException
+        assertEquals(AccessFailure.OFFLINE, error.failure)
+        assertEquals(1, fixture.htmlCalls)
+    }
+
     private fun client(reader: WenkuReader): OkHttpClient = root.newBuilder().addInterceptor(reader::intercept).build()
 
     private fun getPng(client: OkHttpClient, page: Page, existingSize: Long = 0L): ByteArray {
@@ -214,8 +228,9 @@ class WenkuDownloadTest {
 
     private inner class Fixture(val directory: File, var html: String, val lookup: suspend (String) -> ByteArray) {
         var htmlCalls = 0
+        var online = true
         val renderedStyles = mutableListOf<WenkuReadingStyle?>()
-        private val pages = WenkuPages(root, headersOf(), origin, policy = WenkuRequestPolicy(intervalMillis = 0)) { request ->
+        private val pages = WenkuPages(root, headersOf(), origin, policy = WenkuRequestPolicy(intervalMillis = 0), hasNetwork = { online }) { request ->
             htmlCalls++
             val doc = """<div id="contentmain"><div id="title">样本</div><div id="content">$html</div></div>"""
             Response.Builder().request(request).code(200).protocol(Protocol.HTTP_1_1).message("test")

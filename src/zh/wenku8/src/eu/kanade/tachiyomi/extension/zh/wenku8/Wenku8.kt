@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.extension.zh.wenku8
 
+import android.net.ConnectivityManager
 import android.util.Log
+import android.webkit.CookieManager
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.extension.BuildConfig
@@ -21,7 +23,7 @@ import java.io.File
 private const val WEBVIEW_ENTRY = "wenku8_webview_entry"
 private const val VALIDATION_ENTRY = "security"
 
-internal fun wenkuWebViewPath(mode: String?): String = if (mode == VALIDATION_ENTRY) "/top.php" else "/login.php"
+internal fun wenkuWebViewPath(mode: String?): String = if (mode == VALIDATION_ENTRY) WenkuBrowse.rankingPath("allvisit", 1) else "/login.php"
 
 @Source
 abstract class Wenku8 :
@@ -34,21 +36,32 @@ abstract class Wenku8 :
     override fun getHomeUrl(): String = baseUrl + wenkuWebViewPath(preferences.getString(WEBVIEW_ENTRY, null))
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        wenkuPreferenceGroup(screen, "网站访问")(
+        val website = wenkuPreferenceGroup(screen, "网站访问")
+        website(
             ListPreference(screen.context).apply {
                 key = WEBVIEW_ENTRY
                 title = "来源 WebView 打开页面"
                 entries = arrayOf("账号登录（HTTPS）", "站点安全验证（HTTPS 榜单）")
                 entryValues = arrayOf("login", VALIDATION_ENTRY)
                 setDefaultValue("login")
-                summary = "%s\n若热门榜提示验证，切换到站点安全验证，打开来源 WebView 并手动完成站点显示的验证。" +
-                    "关闭后切回账号登录，从 HTTPS 登录页登录，再返回刷新热门榜。若出现 HTTP 登录页，请关闭页面，勿输入账号密码。"
+                summary = "%s\n站点安全验证会打开热门榜。若直接显示书目，说明当前 WebView 可访问。" +
+                    "仅在站点显示验证时手动完成。返回后可检查插件访问状态；仅在提示需要登录时切回账号登录。若出现 HTTP 登录页，请关闭页面，勿输入账号密码。"
             },
         )
+        website(wenkuWebsiteCheckPreference(screen.context) { browse.checkWebsiteAccess() })
         wenkuReadingPreferences(screen, preferences) { reader.refreshPageLists(applicationContext.cacheDir) }
     }
 
-    private val diagnostics = if (BuildConfig.DEBUG) WenkuDiagnostics { Log.d(WenkuDiagnostics.TAG, it) } else null
+    private val diagnostics = if (BuildConfig.DEBUG) {
+        WenkuDiagnostics(webViewCookies = { url ->
+            runCatching {
+                val cookieHeader = CookieManager.getInstance().getCookie(url.toString())
+                WenkuSession.cookieNamesFromHeaders(listOfNotNull(cookieHeader))
+            }.getOrNull()
+        }) { Log.d(WenkuDiagnostics.TAG, it) }
+    } else {
+        null
+    }
 
     // The host's Cloudflare interceptor may start an automated background WebView. This source
     // only allows user-initiated interaction in the host WebView. Preserve the host cookie jar.
@@ -62,7 +75,13 @@ abstract class Wenku8 :
         diagnostics?.let { addInterceptor(it::cover) }
     }.build()
 
-    private val pages by lazy { WenkuPages(client, headers, baseUrl.siteUrl(), diagnostics) }
+    private val pages by lazy {
+        WenkuPages(client, headers, baseUrl.siteUrl(), diagnostics, hasNetwork = {
+            runCatching {
+                applicationContext.getSystemService(ConnectivityManager::class.java)?.let { it.activeNetwork != null }
+            }.getOrNull()
+        })
+    }
     private val browse by lazy { WenkuBrowse(pages, baseUrl.siteUrl(), diagnostics) }
     private val reader: WenkuReader by lazy {
         val origin = baseUrl.siteUrl()

@@ -14,7 +14,7 @@ class WenkuParserTest {
     fun `webview defaults to secure login and can open secure ranking`() {
         assertEquals("https://www.wenku8.net/login.php", origin.resolve(wenkuWebViewPath(null)).toString())
         assertEquals("https://www.wenku8.net/login.php", origin.resolve(wenkuWebViewPath("http://example.org")).toString())
-        assertEquals("https://www.wenku8.net/top.php", origin.resolve(wenkuWebViewPath("security")).toString())
+        assertEquals("https://www.wenku8.net/modules/article/toplist.php?sort=allvisit&page=1", origin.resolve(wenkuWebViewPath("security")).toString())
     }
 
     @Test

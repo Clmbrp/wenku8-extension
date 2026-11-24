@@ -14,6 +14,7 @@ import okhttp3.Dispatcher
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -22,8 +23,12 @@ import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.net.ssl.SSLException
 
 internal enum class AccessFailure {
     LOGIN_REQUIRED,
@@ -32,6 +37,7 @@ internal enum class AccessFailure {
     CLOUDFLARE_BLOCK,
     FORBIDDEN,
     RATE_LIMITED,
+    OFFLINE,
     NETWORK,
     STRUCTURE,
     HTTP,
@@ -41,10 +47,17 @@ internal class WenkuAccessException(val failure: AccessFailure, message: String)
 
 /** Only observes the cookie's presence; the host owns its contents and lifecycle. */
 internal class WenkuSession(private val cookieJar: CookieJar) {
-    fun hasLoginCookie(url: HttpUrl): Boolean = cookieJar.loadForRequest(url).any { it.name == LOGIN_COOKIE }
+    fun cookieNames(url: HttpUrl): Set<String> = cookieJar.loadForRequest(url).mapNotNullTo(mutableSetOf()) { it.name.takeIf(TRACKED::contains) }
 
     companion object {
         const val LOGIN_COOKIE = "jieqiUserInfo"
+        private val TRACKED = setOf(LOGIN_COOKIE, "PHPSESSID", "cf_clearance")
+
+        fun cookieNamesFromHeaders(headers: List<String>): Set<String> = headers.asSequence()
+            .flatMap { it.splitToSequence(';') }
+            .map { it.substringBefore('=', "").trim() }
+            .filter(TRACKED::contains)
+            .toSet()
     }
 }
 
@@ -67,8 +80,12 @@ internal object WenkuErrors {
         if (code !in 200..299) throw WenkuAccessException(AccessFailure.HTTP, "网站返回 HTTP $code")
     }
 
-    fun isChallenge(document: Document): Boolean = document.title().contains("just a moment", ignoreCase = true) ||
-        document.selectFirst("#challenge-form, input[name=cf-turnstile-response], .cf-challenge") != null
+    fun isChallenge(document: Document): Boolean = CHALLENGE_TITLE.matches(document.title()) ||
+        document.selectFirst("#challenge-form, #cf-challenge-running, .cf-challenge") != null
+
+    fun showsSignedIn(document: Document, origin: HttpUrl): Boolean = document.select("a[href*=logout.php]").any { link ->
+        link.absUrl("href").toHttpUrlOrNull()?.let { it.hasWenkuOrigin(origin) && it.encodedPath == "/logout.php" } == true
+    }
 
     fun isCloudflareBlock(document: Document): Boolean = document.selectFirst("#cf-error-details [data-translate=block_headline]") != null ||
         (
@@ -91,6 +108,7 @@ internal object WenkuErrors {
     }
 
     private const val ACTION = "(?:访问|操作|搜索|请求)"
+    private val CHALLENGE_TITLE = Regex("Just a moment(?:\\.{1,3}|…)?", RegexOption.IGNORE_CASE)
     private const val TOO_FREQUENT = """(?:(?:您(?:的)?)?$ACTION(?:过于|太)?[频頻]繁|请(?:勿|不要)[频頻]繁$ACTION)"""
     private const val SEARCH_INTERVAL = """(?:两次)?搜索(?:的)?(?:时间)?间隔(?:太短|过短|不得少于\s*\d+\s*秒)"""
     private const val WAIT_SECONDS = """等待\s*\d+\s*秒(?:后)?再(?:试|$ACTION)"""
@@ -107,8 +125,10 @@ internal class WenkuPages(
     private val origin: HttpUrl,
     private val diagnostics: WenkuDiagnostics? = null,
     private val policy: WenkuRequestPolicy = WenkuRequestPolicy(),
+    private val hasNetwork: () -> Boolean? = { null },
     private val executeRequest: (suspend (Request) -> Response)? = null,
 ) {
+    private val expectedUserAgent = headers["User-Agent"]
     private val client = client.newBuilder()
         // Serve chapter recovery even when the reader's image dispatcher is full.
         .dispatcher(Dispatcher())
@@ -120,7 +140,7 @@ internal class WenkuPages(
             if (diagnostics != null) {
                 addNetworkInterceptor { chain ->
                     val outbound = chain.request()
-                    diagnostics.sent(outbound)
+                    diagnostics.sent(outbound, expectedUserAgent)
                     chain.proceed(outbound)
                 }
             }
@@ -128,19 +148,27 @@ internal class WenkuPages(
         .build()
     private val session = WenkuSession(client.cookieJar)
 
-    suspend fun get(path: String): Document {
+    suspend fun get(path: String, retryOnRateLimit: Boolean = true): Document {
         val url = origin.resolve(path) ?: throw WenkuAccessException(AccessFailure.STRUCTURE, "页面地址无效")
-        return policy.page(url, null) { load(url) }
+        checkNetwork(url)
+        if (!retryOnRateLimit && policy.isCoolingDown()) {
+            diagnostics?.result("throttle", AccessFailure.RATE_LIMITED.name)
+            throw WenkuAccessException(AccessFailure.RATE_LIMITED, "网站正在限流，请稍后再检查")
+        }
+        return policy.page(url, null, retryOnRateLimit) { load(url, retryOnRateLimit = retryOnRateLimit) }
     }
 
     suspend fun searchForm(keyword: String, body: RequestBody): Document {
         val url = origin.newBuilder().encodedPath(WenkuBrowse.SEARCH_FORM).build()
+        checkNetwork(url)
         return policy.page(url, keyword) { load(url, body) }
     }
 
     suspend fun <T> illustration(request: Request, read: (Response) -> T): T {
         require(request.url.hasWenkuOrigin(origin))
+        checkNetwork(request.url)
         return policy.exchange(searchResults = false, retryOnRateLimit = false) {
+            checkNetwork(request.url)
             withResponse(request.newBuilder().headers(headers).header("Accept", "image/*").build()) { response ->
                 if (response.header("cf-mitigated").equals("challenge", ignoreCase = true)) {
                     WenkuErrors.checkStatus(response.code, true)
@@ -151,7 +179,7 @@ internal class WenkuPages(
         }
     }
 
-    private suspend fun load(start: HttpUrl, form: RequestBody? = null): Document {
+    private suspend fun load(start: HttpUrl, form: RequestBody? = null, retryOnRateLimit: Boolean = true): Document {
         var url = start
         var body = form
         var stage = "redirect"
@@ -162,10 +190,12 @@ internal class WenkuPages(
                     throw WenkuAccessException(AccessFailure.STRUCTURE, "页面跳转到未验证的站点")
                 }
                 stage = "throttle"
-                val document = policy.exchange(searchResults = url.encodedPath == WenkuBrowse.SEARCH) {
+                val document = policy.exchange(searchResults = url.encodedPath == WenkuBrowse.SEARCH, retryOnRateLimit = retryOnRateLimit) {
+                    checkNetwork(url)
                     stage = "session"
-                    val hadLoginCookie = session.hasLoginCookie(url)
-                    diagnostics?.session(url, hadLoginCookie)
+                    val names = session.cookieNames(url)
+                    val hadLoginCookie = WenkuSession.LOGIN_COOKIE in names
+                    diagnostics?.session(url, names)
                     stage = "request"
                     val request = Request.Builder().url(url).headers(headers)
                     val currentBody = body
@@ -223,7 +253,7 @@ internal class WenkuPages(
                         if (response.isSuccessful) WenkuErrors.checkPage(document, hadLoginCookie)
                         if (WenkuErrors.isRateLimitNotice(document)) policy.limited(response.header("Retry-After"), response.header("Date"))
                         WenkuErrors.checkStatus(response.code, false)
-                        diagnostics?.result("page", "HTML")
+                        diagnostics?.acceptedHtml(WenkuErrors.showsSignedIn(document, origin))
                         document
                     }
                 }
@@ -231,6 +261,16 @@ internal class WenkuPages(
             }
         } catch (e: IOException) {
             currentCoroutineContext().ensureActive()
+            checkNetwork(url)
+            diagnostics?.transport(
+                when (e) {
+                    is UnknownHostException -> "DNS"
+                    is SocketTimeoutException -> "TIMEOUT"
+                    is ConnectException -> "CONNECT"
+                    is SSLException -> "TLS"
+                    else -> "IO"
+                },
+            )
             diagnostics?.result(stage, AccessFailure.NETWORK.name)
             throw WenkuAccessException(AccessFailure.NETWORK, "网络连接失败或超时，请检查网络后重试")
         } catch (e: WenkuAccessException) {
@@ -238,6 +278,17 @@ internal class WenkuPages(
             throw e
         }
         throw WenkuAccessException(AccessFailure.STRUCTURE, "页面跳转次数过多")
+    }
+
+    private fun checkNetwork(url: HttpUrl) {
+        if (hasNetwork() != false) return
+        diagnostics?.let { trace ->
+            trace.transport("OFFLINE")
+            if (url.hasWenkuOrigin(origin)) {
+                runCatching { session.cookieNames(url) }.getOrNull()?.let { trace.session(url, it) }
+            }
+        }
+        throw WenkuAccessException(AccessFailure.OFFLINE, "设备未连接网络，联网后可以重试")
     }
 
     private suspend fun <T> withResponse(request: Request, read: (Response) -> T): T {

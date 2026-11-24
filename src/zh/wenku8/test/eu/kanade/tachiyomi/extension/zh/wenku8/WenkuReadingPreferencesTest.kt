@@ -8,8 +8,10 @@ import java.util.Locale
 class WenkuReadingPreferencesTest {
     @Test
     fun `three font presets and one custom option preserve old body and heading values`() {
-        val labels = listOf("小号", "标准", "大号")
+        assertEquals(listOf("小号 · 34 px", "标准 · 42 px", "大号 · 56 px"), wenkuFontSizeLabels(WenkuReadingStyle.BODY_SIZES))
+        assertEquals(listOf("小号 · 42 px", "标准 · 52 px", "大号 · 72 px"), wenkuFontSizeLabels(WenkuReadingStyle.HEADING_SIZES))
         for ((sizes, saved) in listOf(WenkuReadingStyle.BODY_SIZES to "65", WenkuReadingStyle.HEADING_SIZES to "88")) {
+            val labels = wenkuFontSizeLabels(sizes)
             val presets = sizes.map(Int::toString).zip(labels).toMap()
             assertEquals(labels + "自定义…", wenkuReadingOptions(presets, sizes[1].toString(), numeric = true, color = false, unit = " px").values.toList())
             val custom = wenkuReadingOptions(presets, saved, numeric = true, color = false, unit = " px")

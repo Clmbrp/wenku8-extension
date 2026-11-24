@@ -25,9 +25,18 @@ internal class WenkuBrowse(
 
     suspend fun latest(page: Int): WenkuBookPage = ranking(page, "lastupdate")
 
-    private suspend fun ranking(page: Int, sort: String): WenkuBookPage {
+    suspend fun checkWebsiteAccess(): AccessFailure? = try {
+        ranking(1, "allvisit", retryOnRateLimit = false)
+        diagnostics?.result("websiteCheck", "NORMAL")
+        null
+    } catch (error: WenkuAccessException) {
+        diagnostics?.result("websiteCheck", error.failure.name)
+        error.failure
+    }
+
+    private suspend fun ranking(page: Int, sort: String, retryOnRateLimit: Boolean = true): WenkuBookPage {
         require(page > 0)
-        val document = pages.get("$TOPLIST?sort=$sort&page=$page")
+        val document = pages.get(rankingPath(sort, page), retryOnRateLimit)
         return listing(document, page, isSearch = false) {
             it.encodedPath == TOPLIST && it.queryParameter("sort") == sort
         } ?: structure("未识别到排行榜书目，网站结构可能已变化")
@@ -208,6 +217,8 @@ internal class WenkuBrowse(
     companion object {
         const val SEARCH_FORM = "/so.php"
         private const val TOPLIST = "/modules/article/toplist.php"
+
+        fun rankingPath(sort: String, page: Int): String = "$TOPLIST?sort=$sort&page=$page"
         const val SEARCH = "/modules/article/search.php"
         private const val MAX_SEARCH_LINKS = 64
         private val GBK = charset("GBK")

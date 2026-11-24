@@ -14,13 +14,19 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.util.concurrent.atomic.AtomicLong
 
 class WenkuAccessTest {
     private val origin = "https://www.wenku8.net/".toHttpUrl()
+    private val popular = """<html><body><a href="/logout.php">退出登录</a><div id="content">
+        <table class="grid"><tr><td><a href="/book/42.htm">样本书</a></td></tr></table></div></body></html>"""
     private val ranking = """<html><head><meta charset="gbk"></head><body>
         <div class="blocktop"><div class="blockcaption">总热度榜</div><div class="blockcontent">
         <ul class="ultop"><li><a href="/book/42.htm" tiptitle="完整书名">截断</a></li></ul></div></div>
@@ -37,6 +43,128 @@ class WenkuAccessTest {
             .apply { if (location != null) header("Location", location) }
             .body(body.toResponseBody("text/html".toMediaType()))
             .build()
+
+    @Test
+    fun `offline check sends nothing and recovery reuses all visible cookies`() = runBlocking {
+        val cookies = FakeCookieJar(origin)
+        var hasNetwork = true
+        var requests = 0
+        val logs = mutableListOf<String>()
+        val pages = WenkuPages(
+            OkHttpClient.Builder().cookieJar(cookies).build(), headersOf(), origin,
+            WenkuDiagnostics { logs += it }, WenkuRequestPolicy(intervalMillis = 0), hasNetwork = { hasNetwork },
+        ) { request ->
+            requests++
+            assertEquals(setOf("jieqiUserInfo", "PHPSESSID", "cf_clearance"), cookies.loadForRequest(request.url).map { it.name }.toSet())
+            response(request.url, 200, popular.encodeToByteArray())
+        }
+        val browse = WenkuBrowse(pages, origin)
+        assertNull(browse.checkWebsiteAccess())
+        hasNetwork = false
+        assertEquals(AccessFailure.OFFLINE, browse.checkWebsiteAccess())
+        assertEquals(1, requests)
+        hasNetwork = true
+        assertNull(browse.checkWebsiteAccess())
+        assertEquals(2, requests)
+        assertEquals(0, cookies.writes)
+        assertTrue("transport from=OFFLINE to=HTTP" in logs)
+        assertTrue(logs.any { "siteLogin=SIGNED_IN" in it })
+        assertEquals("网站当前访问正常，无需重新验证。", wenkuWebsiteMessage(null))
+    }
+
+    @Test
+    fun `DNS and timeout preserve login and clearance until the next real response`() = runBlocking {
+        val cookies = FakeCookieJar(origin)
+        var requests = 0
+        val logs = mutableListOf<String>()
+        val pages = WenkuPages(
+            OkHttpClient.Builder().cookieJar(cookies).build(), headersOf(), origin,
+            WenkuDiagnostics { logs += it }, WenkuRequestPolicy(intervalMillis = 0), hasNetwork = { true },
+        ) { request ->
+            when (++requests) {
+                1 -> throw SocketTimeoutException("synthetic-timeout-detail")
+                2 -> throw UnknownHostException("synthetic-dns-detail")
+                else -> response(request.url, 200, popular.encodeToByteArray())
+            }
+        }
+        val browse = WenkuBrowse(pages, origin)
+        repeat(2) { assertEquals(AccessFailure.NETWORK, browse.checkWebsiteAccess()) }
+        assertNull(browse.checkWebsiteAccess())
+        assertTrue(cookies.loadForRequest(origin).any { it.name == "jieqiUserInfo" })
+        assertEquals(0, cookies.writes)
+        assertTrue("transport from=TIMEOUT to=DNS" in logs)
+        assertTrue("transport from=DNS to=HTTP" in logs)
+        assertFalse(logs.any { "synthetic-" in it })
+    }
+
+    @Test
+    fun `server challenge and login redirect are classified independently of existing cookies`() = runBlocking {
+        val cookies = FakeCookieJar(origin)
+        val paths = mutableListOf<HttpUrl>()
+        val pages = WenkuPages(OkHttpClient.Builder().cookieJar(cookies).build(), headersOf(), origin, policy = WenkuRequestPolicy(intervalMillis = 0)) { request ->
+            paths += request.url
+            when (paths.size) {
+                1 -> response(request.url, 403).newBuilder().header("cf-mitigated", "challenge").build()
+                2 -> response(request.url, 302, location = "http://www.wenku8.net/login.php")
+                else -> response(request.url, 403)
+            }
+        }
+        val browse = WenkuBrowse(pages, origin)
+        assertEquals(AccessFailure.CHALLENGE, browse.checkWebsiteAccess())
+        assertTrue(wenkuWebsiteMessage(AccessFailure.CHALLENGE).contains("保留现有账号登录"))
+        assertEquals(AccessFailure.SESSION_EXPIRED, browse.checkWebsiteAccess())
+        assertTrue(wenkuWebsiteMessage(AccessFailure.SESSION_EXPIRED).contains("HTTPS 登录页"))
+        assertEquals(AccessFailure.FORBIDDEN, browse.checkWebsiteAccess())
+        assertTrue(paths.all { it.isHttps && it.encodedPath.endsWith("toplist.php") })
+        assertEquals(0, cookies.writes)
+    }
+
+    @Test
+    fun `inline turnstile and ordinary titles do not count as interstitial challenges`() = runBlocking {
+        var requests = 0
+        val pages = WenkuPages(OkHttpClient(), headersOf(), origin, policy = WenkuRequestPolicy(intervalMillis = 0)) { request ->
+            val body = if (++requests == 1) {
+                "<form><input name='username'><input name='password'><input name='cf-turnstile-response'></form>"
+            } else {
+                popular.replace("<html>", "<html><head><title>Book: Just a moment</title></head>")
+            }
+            response(request.url, 200, body.encodeToByteArray())
+        }
+        val browse = WenkuBrowse(pages, origin)
+        assertEquals(AccessFailure.LOGIN_REQUIRED, browse.checkWebsiteAccess())
+        assertNull(browse.checkWebsiteAccess())
+    }
+
+    @Test
+    fun `manual access check reports 429 without retry and regular requests honor the same backoff`() = runBlocking {
+        val time = AtomicLong()
+        val starts = mutableListOf<Long>()
+        val policy = WenkuRequestPolicy(intervalMillis = 0, monotonicMillis = time::get, pause = { time.addAndGet(it) })
+        val pages = WenkuPages(OkHttpClient(), headersOf(), origin, policy = policy) { request ->
+            starts += time.get()
+            if (starts.size == 1) response(request.url, 429).newBuilder().header("Retry-After", "7").build()
+            else response(request.url, 200, popular.encodeToByteArray())
+        }
+        val browse = WenkuBrowse(pages, origin)
+        repeat(2) { assertEquals(AccessFailure.RATE_LIMITED, browse.checkWebsiteAccess()) }
+        assertEquals(listOf(0L), starts)
+        assertEquals("样本书", browse.popular(1).books.single().title)
+        assertEquals(listOf(0L, 7_000L), starts)
+    }
+
+    private class FakeCookieJar(origin: HttpUrl) : CookieJar {
+        var writes = 0
+            private set
+        private val cookies = listOf("jieqiUserInfo", "PHPSESSID", "cf_clearance").map {
+            Cookie.Builder().name(it).value("synthetic").hostOnlyDomain(origin.host).secure().build()
+        }
+
+        override fun loadForRequest(url: HttpUrl): List<Cookie> = cookies.filter { it.matches(url) }
+
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+            writes++
+        }
+    }
 
     @Test
     fun `redirected GBK page is decoded from the HTML declaration`() = runBlocking {
@@ -175,18 +303,19 @@ class WenkuAccessTest {
     @Test
     fun `debug trace reports cookie presence and excludes values and unknown paths`() {
         val logs = mutableListOf<String>()
-        val debug = WenkuDiagnostics { logs += it }
+        val debug = WenkuDiagnostics(webViewCookies = { setOf("cf_clearance") }) { logs += it }
         val url = "https://www.wenku8.net/top.php?secret-query=value#secret-fragment".toHttpUrl()
-        debug.session(url, false)
+        debug.session(url, setOf("cf_clearance"))
         debug.sent(Request.Builder().url(url).header("Cookie", "PHPSESSID=secret-session").build())
-        debug.sent(Request.Builder().url(url).header("Cookie", "other=secret-other; jieqiUserInfo=secret-login").build())
+        debug.sent(Request.Builder().url(url).header("Cookie", "other=secret-other; jieqiUserInfo=secret-login; cf_clearance=secret-clearance")
+            .header("User-Agent", "secret-user-agent").build(), "secret-user-agent")
         debug.redirect("http://www.wenku8.net/login.php?jumpurl=secret-redirect".toHttpUrl())
         debug.redirect("https://secret-host.example/secret-path".toHttpUrl())
         assertEquals(
             listOf(
-                "session url=https://www.wenku8.net/top.php loginCookieVisible=false",
-                "request url=https://www.wenku8.net/top.php loginCookieSent=false",
-                "request url=https://www.wenku8.net/top.php loginCookieSent=true",
+                "session url=https://www.wenku8.net/top.php jarNames=cf_clearance webViewNames=cf_clearance cookieNamesMatch=true",
+                "request url=https://www.wenku8.net/top.php sentNames=PHPSESSID sourceUserAgentMatches=null",
+                "request url=https://www.wenku8.net/top.php sentNames=cf_clearance,jieqiUserInfo sourceUserAgentMatches=true",
                 "redirect target=http://www.wenku8.net/login.php",
                 "redirect target=https://<external>/<redacted>",
             ),

@@ -17,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal fun wenkuReadingStyle(preferences: SharedPreferences, context: Context): WenkuReadingStyle {
     val values = preferences.all
@@ -174,9 +175,8 @@ internal fun wenkuReadingPreferences(screen: PreferenceScreen, preferences: Shar
     fun numbers(name: String, label: String, presets: List<Int>, default: Int, range: IntRange, unit: String, labels: List<String> = presets.map { "$it$unit" }) = list(name, label, presets.map(Int::toString).zip(labels).toMap(), default.toString(), typography, range, unit)
 
     val defaults = WenkuReadingStyle()
-    val sizes = listOf("小号", "标准", "大号")
-    numbers("body_size", "正文字号", WenkuReadingStyle.BODY_SIZES, defaults.bodySize, WenkuReadingStyle.BODY_RANGE, " px", sizes)
-    numbers("heading_size", "标题字号", WenkuReadingStyle.HEADING_SIZES, defaults.headingSize, WenkuReadingStyle.HEADING_RANGE, " px", sizes)
+    numbers("body_size", "正文字号", WenkuReadingStyle.BODY_SIZES, defaults.bodySize, WenkuReadingStyle.BODY_RANGE, " px", wenkuFontSizeLabels(WenkuReadingStyle.BODY_SIZES))
+    numbers("heading_size", "标题字号", WenkuReadingStyle.HEADING_SIZES, defaults.headingSize, WenkuReadingStyle.HEADING_RANGE, " px", wenkuFontSizeLabels(WenkuReadingStyle.HEADING_SIZES))
     numbers("line_spacing", "行距", WenkuReadingStyle.LINE_SPACING, defaults.lineSpacingPercent, WenkuReadingStyle.LINE_RANGE, "%", listOf("紧凑 · 115%", "标准 · 135%", "宽松 · 155%", "很宽松 · 175%"))
     numbers("paragraph_gap", "段落间距", WenkuReadingStyle.PARAGRAPH_GAPS, defaults.paragraphGap, WenkuReadingStyle.PARAGRAPH_RANGE, " px", listOf("紧凑 · 18 px", "标准（保留原空行）", "宽松 · 72 px"))
     numbers("side_margin", "左右页边距", WenkuReadingStyle.SIDE_MARGINS, defaults.horizontalMargin, WenkuReadingStyle.MARGIN_RANGE, " px")
@@ -229,6 +229,39 @@ internal fun wenkuReadingPreferences(screen: PreferenceScreen, preferences: Shar
 
 private const val CUSTOM_ENTRY = "custom"
 private data class ReadingPreference(val reset: () -> Unit, val sync: () -> Unit)
+
+internal fun wenkuFontSizeLabels(sizes: List<Int>): List<String> = listOf("小号", "标准", "大号").zip(sizes) { label, size -> "$label · $size px" }
+
+internal fun wenkuWebsiteCheckPreference(context: Context, checkAccess: suspend () -> AccessFailure?): Preference = plainPreference(context).apply {
+    title = "检查网站访问状态"
+    summary = "使用插件的正常网络请求检查热门榜。"
+    setOnPreferenceClickListener {
+        setEnabled(false)
+        summary = "正在检查网站访问…"
+        CoroutineScope(Dispatchers.Main).launch {
+            try {
+                summary = withTimeoutOrNull(35_000) { wenkuWebsiteMessage(checkAccess()) }
+                    ?: "本次检查超时。请稍后手动重试。"
+            } finally {
+                setEnabled(true)
+            }
+        }
+        true
+    }
+}
+
+internal fun wenkuWebsiteMessage(failure: AccessFailure?): String = when (failure) {
+    null -> "网站当前访问正常，无需重新验证。"
+    AccessFailure.OFFLINE -> "设备未连接网络。恢复联网后再检查。"
+    AccessFailure.NETWORK -> "连接网站失败。请检查网络、DNS 或代理，然后重试。"
+    AccessFailure.LOGIN_REQUIRED, AccessFailure.SESSION_EXPIRED -> "网站要求账号登录。切换到「账号登录」，从 HTTPS 登录页登录。"
+    AccessFailure.CHALLENGE -> "网站要求 Cloudflare 安全验证。切换到「站点安全验证」，在来源 WebView 手动处理站点显示的挑战，保留现有账号登录。"
+    AccessFailure.RATE_LIMITED -> "网站访问频繁，正在限流。请稍后手动重试。"
+    AccessFailure.CLOUDFLARE_BLOCK -> "Cloudflare 拒绝插件的请求。可在来源 WebView 确认网页是否可访问。"
+    AccessFailure.FORBIDDEN -> "网站拒绝访问（403）。可在来源 WebView 确认网页是否可访问。"
+    AccessFailure.HTTP -> "网站返回错误响应，请稍后重试。"
+    AccessFailure.STRUCTURE -> "网站有响应，但插件未识别到热门榜。可在来源 WebView 查看。"
+}
 
 internal fun wenkuReadingOptions(presets: Map<String, String>, value: String, numeric: Boolean, color: Boolean, unit: String): Map<String, String> = presets.toMutableMap().apply {
     when {

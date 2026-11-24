@@ -20,13 +20,16 @@ internal class WenkuRequestPolicy(
     private val wallMillis: () -> Long = System::currentTimeMillis,
     private val pause: suspend (Long) -> Unit = { delay(it) },
 ) {
-    private val flights = WenkuFlights<Pair<HttpUrl, String?>, Document>()
+    private val flights = WenkuFlights<Triple<HttpUrl, String?, Boolean>, Document>()
     private val gate = Mutex()
     private var lastStart: Long? = null
     private var lastSearchStart: Long? = null
-    private var cooldownUntil = 0L
 
-    suspend fun page(url: HttpUrl, searchKeyword: String?, load: suspend () -> Document): Document = flights.await(url to searchKeyword, load)
+    @Volatile private var cooldownUntil = 0L
+
+    suspend fun page(url: HttpUrl, searchKeyword: String?, retryOnRateLimit: Boolean = true, load: suspend () -> Document): Document = flights.await(Triple(url, searchKeyword, retryOnRateLimit), load)
+
+    fun isCoolingDown(): Boolean = cooldownUntil > monotonicMillis()
 
     suspend fun <T> exchange(searchResults: Boolean, retryOnRateLimit: Boolean = true, load: suspend () -> T): T = try {
         dispatch(searchResults, load)
